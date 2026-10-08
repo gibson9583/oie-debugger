@@ -17,8 +17,10 @@ Requires Java 17+, OIE 4.6.0, and Web Administrator plugin API 4.7 or newer. Plu
 
 1. Download the plugin ZIP from [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases).
 2. Install it through the engine's extension installer.
-3. Set `rhino.optimizationlevel=-1` in the engine configuration and restart the engine.
+3. Restart the engine.
 4. Reload Web Administrator and open **Monitor → Debugger**.
+
+The debugger requires `rhino.optimizationlevel=-1`, which is OIE's default when the property is absent. If `conf/mirth.properties` explicitly sets a different value, change it to `-1` before restarting. Otherwise, no configuration change is needed.
 
 Redeploy channels that were compiled while the debugger was disabled so their scripts become available.
 
