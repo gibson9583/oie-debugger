@@ -1,0 +1,544 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DebuggerClient, authoredStepLine, breakpointLines, jsonTransport, ownerContext, sourceMatchesFrame } from '../web/debugger-client.js';
+
+const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+const session = (patch = {}) => ({ id: 's-1', status: 'paused', channelId: 'channel-1', pauseGeneration: 2, frames: [], ...patch });
+function fixture(overrides = {}) {
+    let owner = 'engine-a/user-a', serial = 0;
+    const calls = [], scheduled = new Map();
+    const transport = Object.fromEntries(['get', 'post', 'put', 'del'].map(method => [method, async (...args) => {
+        calls.push([method, ...args]);
+        if (method === 'post' && args[1]?.action === 'setBreakpoints' && overrides.breakpointCommand) return overrides.breakpointCommand(...args);
+        if (overrides[method]) return overrides[method](...args);
+        return method === 'post' && args[0] === '/sessions' ? session() : { status: 'completed' };
+    }]));
+    const client = new DebuggerClient({ transport, newId: () => `uuid-${++serial}`, context: () => owner, timers: {
+        setTimeout: (fn, ms) => { const id = ++serial; scheduled.set(id, { fn, ms }); return id; },
+        clearTimeout: id => scheduled.delete(id),
+    } });
+    return { client, calls, scheduled, owner: value => { owner = value; } };
+}
+
+test('plain JSON transport preserves singleton objects and literal request payloads', async () => {
+    const seen = [];
+    const api = {
+        get: async (...args) => { seen.push(args); return '{"sources":[]}'; },
+        post: async (...args) => { seen.push(args); return '{"result":{"value":"x"}}'; },
+        put: async (...args) => { seen.push(args); return '{}'; },
+        del: async (...args) => { seen.push(args); return ''; },
+    };
+    const apiJson = jsonTransport(api);
+    assert.deepEqual(await apiJson.get('/sources', { channelId: 'x' }), { sources: [] });
+    assert.deepEqual(await apiJson.post('/sessions', { watches: ['a', 'b'] }), { result: { value: 'x' } });
+    await apiJson.put('/sessions/s/breakpoints', { lines: [1, 2] });
+    assert.equal(await apiJson.del('/sessions/s', { tabId: 'token' }), null);
+    assert.equal(seen[0][2].raw, true);
+    assert.equal(seen[1][1], '{"watches":["a","b"]}');
+    assert.equal(seen[2][1], '{"lines":[1,2]}');
+});
+
+test('owner context changes on user, engine or login changes but not unrelated cookies', () => {
+    let user = { id: 1 };
+    const store = { getState: () => user };
+    const a = ownerContext(store, 'oie-engine=a; other=1; oie-login=one');
+    assert.equal(a, ownerContext(store, 'other=2; oie-login=one; oie-engine=a'));
+    assert.notEqual(a, ownerContext(store, 'oie-engine=b; oie-login=one'));
+    assert.notEqual(a, ownerContext(store, 'oie-engine=a; oie-login=two'));
+    user = { id: 2 };
+    assert.notEqual(a, ownerContext(store, 'oie-engine=a; oie-login=one'));
+    user = null;
+    assert.equal(ownerContext(store), null);
+});
+
+test('source identity requires id, hash and deployment generation', () => {
+    const source = { id: 's', hash: 'hash', generation: 2 };
+    const frame = { sourceId: 's', sourceHash: 'hash', sourceGeneration: 2 };
+    assert.equal(sourceMatchesFrame(source, frame), true);
+    assert.equal(sourceMatchesFrame(source, { ...frame, sourceHash: 'old' }), false);
+    assert.equal(sourceMatchesFrame(source, { ...frame, sourceGeneration: 1 }), false);
+});
+
+test('breakpoints reject non-executable lines and fractional hit counts', () => {
+    const source = { breakableLines: [2, 4] };
+    assert.throws(() => breakpointLines(source, [{ line: 3 }]), /not executable/);
+    assert.throws(() => breakpointLines(source, [{ line: 2, hitCount: 1.5 }]), /positive whole/);
+    assert.throws(() => breakpointLines({}, []), /not verified/);
+    assert.deepEqual(breakpointLines(source, [{ line: 2, condition: ' x > 3 ', hitCount: 4, enabled: false }]), [{ line: 2, condition: 'x > 3', hitCount: 4, enabled: false }]);
+});
+
+test('source selection and channel list responses are fenced independently', async () => {
+    const first = deferred(), second = deferred();
+    const { client } = fixture({ get: path => path.endsWith('/one') ? first.promise : second.promise });
+    const a = client.source('one', 'channel-1'), b = client.source('two', 'channel-1');
+    second.resolve({ id: 'two' }); await b;
+    first.resolve({ id: 'one' }); await a;
+    assert.equal(client.state.source.id, 'two');
+    client.dispose();
+});
+
+test('source detail carries the current session and tab only while the session is active', async () => {
+    const { client, calls } = fixture({ get: () => ({ id: 'dynamic-source', text: 'value;' }) });
+    await client.source('deployed-source', 'channel-1');
+    assert.deepEqual(calls[0][2], { channelId: 'channel-1' });
+    await client.arm({ channelId: 'channel-1' });
+    await client.source('dynamic-source', 'channel-1');
+    assert.deepEqual(calls[2], ['get', '/sources/dynamic-source', { channelId: 'channel-1', debugSessionId: 's-1', tabId: client.tabId }]);
+    client.emit({ session: session({ status: 'closed' }) });
+    await client.source('deployed-source', 'channel-1');
+    assert.deepEqual(calls[3][2], { channelId: 'channel-1' });
+    client.dispose();
+});
+
+test('confirmed arm settings copy submitted options and survive live identity updates', async () => {
+    const pending = deferred(), states = [];
+    const { client, calls } = fixture({ post: () => pending.promise,
+        get: () => session({ messageId: '99', connectorId: '3' }) });
+    client.changed = next => states.push(next);
+    const options = { channelId: 'channel-1', messageId: '17', connectorId: 0,
+        breakOnEntry: false, pauseOnExceptions: true, includeLifecycle: false,
+        evaluationEnabled: true, watches: ['msg'], maxPauseMillis: 45000 };
+    const expected = { ...options, watches: [...options.watches] };
+    const arming = client.arm(options);
+    assert.equal(client.state.armOptions, null);
+    options.messageId = 'changed'; options.breakOnEntry = true; options.watches.push('newWatch');
+    assert.deepEqual(calls[0][2], { ...expected, tabId: client.tabId });
+    pending.resolve(session({ status: 'armed' })); await arming;
+    assert.deepEqual(client.state.armOptions, expected);
+    assert(states.filter(next => next.session).every(next => next.armOptions === client.state.armOptions),
+        'the session and its confirmed settings are published together');
+    options.watches[0] = 'changedAgain';
+    await client.poll();
+    assert.equal(client.state.session.messageId, '99');
+    assert.equal(client.state.session.connectorId, '3');
+    assert.deepEqual(client.state.armOptions, expected, 'live execution identity does not replace target filters');
+    client.dispose();
+    assert.equal(client.state.armOptions, null);
+});
+
+test('failed or incompatible arm responses do not confirm settings', async () => {
+    for (const response of [null, {}, session({ status: 'closed' }), new Error('request failed')]) {
+        const { client } = fixture({ post: () => {
+            if (response instanceof Error) throw response;
+            return response;
+        } });
+        await client.arm({ channelId: 'channel-1', breakOnEntry: false });
+        assert.equal(client.state.session, null);
+        assert.equal(client.state.armOptions, null);
+        assert.notEqual(client.state.error, '');
+        client.dispose();
+    }
+});
+
+test('confirmed settings survive failed close and connection loss until successful close', async () => {
+    let fail = true;
+    const { client } = fixture({ del: () => {
+        if (fail) throw new Error('close outcome unknown');
+        return { status: 'closed' };
+    } });
+    await client.arm({ channelId: 'channel-1', messageId: '17', breakOnEntry: false });
+    const confirmed = client.state.armOptions;
+    await client.disarm();
+    assert.equal(client.state.lost, true);
+    assert.equal(client.state.session.id, 's-1');
+    assert.equal(client.state.armOptions, confirmed);
+    fail = false; await client.disarm();
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.armOptions, null);
+    client.dispose();
+});
+
+test('server closure retains historical settings and rearming replaces the message filter', async () => {
+    let nextArm = null;
+    const { client, calls } = fixture({ get: () => session({ status: 'closed' }),
+        post: () => nextArm ? nextArm.promise : session({ status: 'armed' }) });
+    const original = { channelId: 'channel-1', messageId: '17', connectorId: 0, breakOnEntry: false };
+    await client.arm(original);
+    const confirmed = client.state.armOptions;
+    await client.poll();
+    assert.equal(client.state.session.status, 'closed');
+    assert.equal(client.state.armOptions, confirmed);
+    await client.disarm();
+    nextArm = deferred();
+    const replacement = { ...original }; delete replacement.messageId;
+    const arming = client.arm(replacement);
+    assert.equal(client.state.armOptions, null);
+    nextArm.resolve(session({ id: 's-2', status: 'armed' })); await arming;
+    assert.deepEqual(client.state.armOptions, replacement);
+    assert.equal(Object.hasOwn(client.state.armOptions, 'messageId'), false);
+    assert.deepEqual(calls.filter(call => call[0] === 'post').map(call => call[2]),
+        [{ ...original, tabId: client.tabId }, { ...replacement, tabId: client.tabId }]);
+    client.dispose();
+    assert.equal(client.state.armOptions, null);
+});
+
+test('late successful arming after unmount releases the created session without reviving it', async () => {
+    const pending = deferred();
+    const { client, calls, scheduled } = fixture({ post: () => pending.promise });
+    const arm = client.arm({ channelId: 'channel-1' });
+    client.dispose();
+    pending.resolve(session()); await arm;
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.armOptions, null);
+    assert.equal(scheduled.size, 0);
+    assert.deepEqual(calls[1], ['del', '/sessions/s-1', { tabId: client.tabId }]);
+});
+
+test('engine changes fence in-flight arming and never send cleanup to a different engine', async () => {
+    const pending = deferred();
+    const { client, calls, owner } = fixture({ post: () => pending.promise });
+    const arm = client.arm({ channelId: 'channel-1' });
+    owner('engine-b/user-a');
+    pending.resolve(session()); await arm;
+    assert.equal(client.state.armOptions, null);
+    client.dispose();
+    assert.equal(client.state.session, null);
+    assert.equal(calls.length, 1);
+});
+
+test('double arm is suppressed and failed arm never starts lease renewal', async () => {
+    const pending = deferred();
+    const { client, calls, scheduled } = fixture({ post: () => pending.promise });
+    const arm = client.arm({ channelId: 'channel-1' });
+    await client.arm({ channelId: 'channel-1' });
+    assert.equal(calls.length, 1);
+    pending.reject(new Error('access denied')); await arm;
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.busy, false);
+    assert.equal(scheduled.size, 0);
+    client.dispose();
+});
+
+test('lease renewal and polling stop on unmount or a failed heartbeat', async () => {
+    const { client, calls, scheduled } = fixture({ post: path => path.endsWith('/heartbeat') ? Promise.reject(new Error('offline')) : session() });
+    await client.arm({ channelId: 'channel-1' });
+    assert.equal(scheduled.size, 2);
+    await client.heartbeat();
+    assert.equal(scheduled.size, 0);
+    assert.equal(client.state.lost, true);
+    const count = calls.length;
+    await client.heartbeat(); await client.poll();
+    assert.equal(calls.length, count);
+    client.dispose();
+});
+
+test('ambiguous command failures retain their exact command ID and body for retry', async () => {
+    let attempt = 0;
+    const { client, calls } = fixture({ post: path => path === '/sessions' ? session() : ++attempt === 1 ? Promise.reject(new Error('timeout')) : { status: 'completed', result: 7 } });
+    await client.arm({ channelId: 'channel-1' });
+    await client.command('evaluate', { expression: 'a++', frameIndex: 0 });
+    const original = client.state.pending;
+    assert.equal(original.expectedPauseGeneration, 2);
+    await assert.rejects(client.command('evaluate', { expression: 'a++' }), /pending command/);
+    await client.command('', {}, true);
+    assert.deepEqual(calls[1][2], calls[2][2]);
+    assert.equal(client.state.pending, null);
+    assert.equal(client.state.receipt.result, 7);
+    client.dispose();
+});
+
+test('queued commands automatically resolve by polling the original receipt and disposal cancels polling', async () => {
+    let attempt = 0;
+    const { client, calls, scheduled } = fixture({ post: path => path === '/sessions' ? session() : ++attempt === 1 ? { status: 'pending' } : { status: 'completed', result: 42 } });
+    await client.arm({ channelId: 'channel-1' });
+    await client.command('evaluate', { expression: 'answer', frameIndex: 0 });
+    const pollReceipt = [...scheduled.values()].find(timer => timer.ms === 250);
+    assert(pollReceipt);
+    pollReceipt.fn();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls[1][2], calls[2][2]);
+    assert.equal(client.state.pending, null);
+    assert.equal(client.state.receipt.result, 42);
+    client.dispose();
+    assert.equal(scheduled.size, 0);
+});
+
+test('dispose erases paused source and inspection data before any later response', async () => {
+    const { client } = fixture();
+    await client.arm({ channelId: 'channel-1' });
+    client.emit({ source: { text: 'sensitive' }, sources: [{ id: 'secret' }], receipt: { result: 'private' } });
+    client.dispose();
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.source, null);
+    assert.equal(client.state.receipt, null);
+    assert.deepEqual(client.state.sources, []);
+});
+
+test('a newer channel source listing wins when previous channel response arrives late', async () => {
+    const first = deferred(), second = deferred();
+    const { client } = fixture({ get: (path, params) => params.channelId === 'first' ? first.promise : second.promise });
+    const a = client.sources('first'), b = client.sources('second');
+    second.resolve([{ id: 'source-b' }]); await b;
+    first.resolve([{ id: 'source-a' }]); await a;
+    assert.deepEqual(client.state.sources, [{ id: 'source-b' }]);
+    client.dispose();
+});
+
+test('a completed step hides paused controls and stale GET cannot undo the step', async () => {
+    const oldPoll = deferred();
+    const { client } = fixture({ get: () => oldPoll.promise });
+    await client.arm({ channelId: 'channel-1' });
+    const poll = client.poll();
+    await client.command('stepOver');
+    assert.equal(client.state.session.status, 'running');
+    oldPoll.resolve(session()); await poll;
+    assert.equal(client.state.session.status, 'running');
+    client.dispose();
+});
+
+test('late command response cannot restore a disarmed session', async () => {
+    const receipt = deferred();
+    const { client } = fixture({ post: path => path === '/sessions' ? session() : receipt.promise });
+    await client.arm({ channelId: 'channel-1' });
+    const command = client.command('evaluate', { expression: '1' });
+    await client.disarm();
+    receipt.resolve({ status: 'completed', result: '1' }); await command;
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.receipt, null);
+    client.dispose();
+});
+
+test('server closure fences in-flight commands and clears pending controls', async () => {
+    const receipt = deferred();
+    const { client } = fixture({ post: path => path === '/sessions' ? session() : receipt.promise, get: () => session({ status: 'closed' }) });
+    await client.arm({ channelId: 'channel-1' });
+    const command = client.command('continue');
+    await client.poll();
+    receipt.resolve({ status: 'completed' }); await command;
+    assert.equal(client.state.session.status, 'closed');
+    assert.equal(client.state.pending, null);
+    assert.equal(client.state.busy, false);
+    client.dispose();
+});
+
+test('breakpoint mutation carries compiled identity and confirms only after server success', async () => {
+    const receipt = deferred();
+    const { client, calls } = fixture({ breakpointCommand: () => receipt.promise });
+    await client.arm({ channelId: 'channel-1' });
+    const source = { id: 'src', hash: 'hash', generation: 3, breakableLines: [4] };
+    const write = client.setBreakpoints(source, [{ line: 4 }]);
+    assert.deepEqual(client.state.breakpoints, {});
+    assert.equal(calls[1][0], 'post');
+    assert.equal(calls[1][1], '/sessions/s-1/commands');
+    assert.deepEqual(calls[1][2], { tabId: client.tabId, commandId: client.state.pending.commandId, expectedPauseGeneration: 2, action: 'setBreakpoints', sourceId: 'src', sourceHash: 'hash', sourceGeneration: 3, lines: [{ line: 4, hitCount: 1, enabled: true, condition: '' }] });
+    receipt.resolve({ status: 'completed' }); await write;
+    assert.equal(client.state.breakpoints.src[0].line, 4);
+    client.dispose();
+});
+
+test('breakpoint uncertainty blocks further changes and reuses its receipt before any newer write', async () => {
+    for (const alreadyApplied of [false, true]) {
+        const receipts = new Map();
+        let serverLines = [], applications = 0, requests = 0, delayedOriginal;
+        // Model the server contract: cached command IDs never apply twice, even
+        // if the original timed-out request arrives after its retry/newer write.
+        const server = body => {
+            if (receipts.has(body.commandId)) return receipts.get(body.commandId);
+            applications++;
+            serverLines = body.lines;
+            const receipt = { status: 'completed', result: { sourceId: body.sourceId, count: body.lines.length } };
+            receipts.set(body.commandId, receipt);
+            return receipt;
+        };
+        const { client, calls } = fixture({
+            get: () => session(),
+            breakpointCommand: (path, body) => {
+                if (++requests === 1) {
+                    delayedOriginal = () => server(body);
+                    if (alreadyApplied) delayedOriginal();
+                    throw new Error('No confirmed response');
+                }
+                return server(body);
+            },
+        });
+        await client.arm({ channelId: 'channel-1' });
+        const source = { id: 'src', hash: 'hash', generation: 3, breakableLines: [4, 8] };
+        assert.equal(await client.setBreakpoints(source, [{ line: 4 }]), false);
+        const pending = client.state.pending;
+        assert.equal(pending.action, 'setBreakpoints');
+        assert.deepEqual(client.state.breakpoints, {});
+        assert.equal(await client.setBreakpoints(source, [{ line: 8 }]), false);
+        await assert.rejects(client.command('continue'), /pending command/);
+        assert.equal(requests, 1);
+        await client.poll();
+        assert.equal(client.state.pending, pending);
+        await client.command('', {}, true);
+        assert.equal(client.state.pending, null);
+        assert.deepEqual(client.state.breakpoints.src, serverLines);
+        assert.equal(applications, 1);
+        const writes = calls.filter(call => call[2]?.action === 'setBreakpoints');
+        assert.deepEqual(writes[0][2], writes[1][2]);
+        assert.equal(await client.setBreakpoints(source, [{ line: 8 }]), true);
+        delayedOriginal();
+        assert.equal(applications, 2);
+        assert.equal(serverLines[0].line, 8);
+        assert.deepEqual(client.state.breakpoints.src, serverLines);
+        client.dispose();
+    }
+});
+
+test('malformed breakpoint receipts remain unresolved, and failed receipts never confirm a breakpoint', async () => {
+    for (const receipt of [{}, { status: 'unexpected' }, null]) {
+        const { client } = fixture({ breakpointCommand: () => receipt });
+        await client.arm({ channelId: 'channel-1' });
+        assert.equal(await client.setBreakpoints({ id: 'src', breakableLines: [4] }, [{ line: 4 }]), false);
+        assert.equal(client.state.pending.action, 'setBreakpoints');
+        assert.match(client.state.error, /incompatible command receipt/);
+        assert.deepEqual(client.state.breakpoints, {});
+        client.dispose();
+    }
+    const { client } = fixture({ breakpointCommand: () => ({ status: 'completed', error: 'Source generation changed' }) });
+    await client.arm({ channelId: 'channel-1' });
+    assert.equal(await client.setBreakpoints({ id: 'src', breakableLines: [4] }, [{ line: 4 }]), false);
+    assert.equal(client.state.pending, null);
+    assert.deepEqual(client.state.breakpoints, {});
+    assert.equal(client.state.error, 'Source generation changed');
+    client.dispose();
+});
+
+function authoredSource() {
+    return { id: 'src', hash: 'compiled-hash', generation: 3, breakableLines: [2, 8, 6], authoredMappings: [
+        { sourceId: 'src', authoredId: 'step-1', name: 'Normalize family name', generatedStartLine: 5, generatedEndLine: 8 },
+    ] };
+}
+function displayRunTarget(client, source, patch = {}) {
+    client.emit({ source, session: session({ frames: [{ index: 0, sourceId: source.id, sourceHash: source.hash, sourceGeneration: source.generation, line: 2 }], ...patch }) });
+}
+
+test('authored step target is first executable line in its verified range, not the first text line', () => {
+    const source = authoredSource(), mapping = source.authoredMappings[0];
+    assert.equal(authoredStepLine(source, mapping), 6);
+    assert.throws(() => authoredStepLine(source, { ...mapping }), /verified authored step/);
+    assert.throws(() => authoredStepLine({ ...source, id: 'other-source' }, mapping), /verified authored step/);
+    assert.throws(() => authoredStepLine({ ...source, breakableLines: [2, 9] }, mapping), /no executable line/);
+    const invalid = { ...mapping, generatedStartLine: 0 };
+    assert.throws(() => authoredStepLine({ ...source, authoredMappings: [invalid] }, invalid), /verified generated line range/);
+});
+
+test('run to authored step confirms additive breakpoint before continuing exact pause', async () => {
+    const installed = deferred(), { client, calls } = fixture({ breakpointCommand: () => installed.promise });
+    await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    const original = [{ line: 2, condition: 'keepMe', hitCount: 3, enabled: true }, { line: 8, condition: '', hitCount: 1, enabled: false }];
+    client.emit({ breakpoints: { src: original } });
+    const running = client.runToAuthoredStep(source, source.authoredMappings[0]);
+    assert.equal(calls.length, 2); assert.equal(calls[1][0], 'post'); assert.equal(calls[1][2].action, 'setBreakpoints');
+    assert.deepEqual(calls[1][2], { tabId: client.tabId, commandId: client.state.pending.commandId, expectedPauseGeneration: 2, action: 'setBreakpoints', sourceId: 'src', sourceHash: 'compiled-hash', sourceGeneration: 3,
+        lines: [...original, { line: 6, condition: '', hitCount: 1, enabled: true }] });
+    assert.equal(client.state.session.status, 'paused');
+    installed.resolve({ status: 'completed' }); assert.deepEqual(await running, { line: 6, alreadyPaused: false });
+    assert.equal(calls[2][1], '/sessions/s-1/commands');
+    assert.equal(calls[2][2].action, 'continue'); assert.equal(calls[2][2].expectedPauseGeneration, 2);
+    assert.equal(client.state.session.status, 'running'); assert.equal(client.state.breakpoints.src.length, 3);
+    client.dispose();
+});
+
+test('run to step reuses a user unconditional breakpoint and refuses to overwrite conflicting settings', async () => {
+    for (const conflicting of [{ enabled: false }, { condition: 'x > 1' }, { hitCount: 2 }]) {
+        const { client, calls } = fixture(); await client.arm({ channelId: 'channel-1' });
+        const source = authoredSource(); displayRunTarget(client, source);
+        const entries = [{ line: 6, enabled: true, hitCount: 1, condition: '', ...conflicting }];
+        client.emit({ breakpoints: { src: entries } });
+        await assert.rejects(client.runToAuthoredStep(source, source.authoredMappings[0]), /already has/);
+        assert.equal(calls.length, 1); assert.deepEqual(client.state.breakpoints.src, entries); client.dispose();
+    }
+    const { client, calls } = fixture(); await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    client.emit({ breakpoints: { src: [{ line: 6, enabled: true, hitCount: 1, condition: '' }] } });
+    await client.runToAuthoredStep(source, source.authoredMappings[0]);
+    assert.equal(calls.length, 2); assert.equal(calls[1][0], 'post'); client.dispose();
+});
+
+test('already paused at the authored target never resumes past it', async () => {
+    const { client, calls } = fixture(); await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    client.state.session.frames[0].line = 6;
+    assert.deepEqual(await client.runToAuthoredStep(source, source.authoredMappings[0]), { line: 6, alreadyPaused: true });
+    assert.equal(calls.length, 1); assert.equal(client.state.session.status, 'paused'); client.dispose();
+});
+
+test('breakpoint rejection or ambiguous transport failure never triggers continue', async () => {
+    for (const error of [Object.assign(new Error('source replaced'), { status: 409 }), new Error('timeout')]) {
+        const { client, calls } = fixture({ breakpointCommand: () => Promise.reject(error) });
+        await client.arm({ channelId: 'channel-1' });
+        const source = authoredSource(); displayRunTarget(client, source);
+        assert.equal(await client.runToAuthoredStep(source, source.authoredMappings[0]), null);
+        assert.equal(calls.length, 2); assert.equal(client.state.session.status, 'paused');
+        assert.match(client.state.error, new RegExp(error.message)); client.dispose();
+    }
+});
+
+test('pending commands and stale source identity prevent run-to-step mutations', async () => {
+    const { client, calls } = fixture(); await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    client.emit({ pending: { commandId: 'unresolved' } });
+    await assert.rejects(client.runToAuthoredStep(source, source.authoredMappings[0]), /pending command/);
+    client.emit({ pending: null }); client.state.session.frames[0].sourceHash = 'different-compiled-source';
+    await assert.rejects(client.runToAuthoredStep(source, source.authoredMappings[0]), /does not match/);
+    assert.equal(calls.length, 1); client.dispose();
+});
+
+test('a changed pause generation during breakpoint installation cannot be continued', async () => {
+    const installed = deferred(), { client, calls } = fixture({ breakpointCommand: () => installed.promise });
+    await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    const running = client.runToAuthoredStep(source, source.authoredMappings[0]);
+    displayRunTarget(client, source, { pauseGeneration: 3 }); installed.resolve({ status: 'completed' });
+    await assert.rejects(running, /Execution state changed/);
+    assert.equal(calls.length, 2); assert.equal(client.state.session.pauseGeneration, 3); client.dispose();
+});
+
+test('source selection changed during breakpoint installation cannot silently resume another selection', async () => {
+    const installed = deferred(), { client, calls } = fixture({ breakpointCommand: () => installed.promise });
+    await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    const running = client.runToAuthoredStep(source, source.authoredMappings[0]);
+    client.emit({ source: { ...source, hash: 'new-hash' } }); installed.resolve({ status: 'completed' });
+    await assert.rejects(running, /displayed source changed/); assert.equal(calls.length, 2); client.dispose();
+});
+
+test('ownership change or disposal while installing run breakpoint never sends a resume', async () => {
+    for (const invalidation of ['owner', 'dispose']) {
+        const installed = deferred(), { client, calls, owner } = fixture({ breakpointCommand: () => installed.promise });
+        await client.arm({ channelId: 'channel-1' });
+        const source = authoredSource(); displayRunTarget(client, source);
+        const running = client.runToAuthoredStep(source, source.authoredMappings[0]);
+        if (invalidation === 'owner') owner('engine-b/user-a'); else client.dispose();
+        installed.resolve({ status: 'completed' }); await running;
+        assert.equal(calls.filter(call => call[2]?.action === 'continue').length, 0); client.dispose();
+    }
+});
+
+test('run-to-step queued continue retains its original command ID for receipt polling', async () => {
+    let attempts = 0;
+    const { client, calls } = fixture({ post: (path, body) => path === '/sessions' ? session() : body.action === 'setBreakpoints' ? { status: 'completed' } : ++attempts === 1 ? { status: 'pending' } : { status: 'completed' } });
+    await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    await client.runToAuthoredStep(source, source.authoredMappings[0]);
+    const pending = client.state.pending; assert.equal(pending.action, 'continue'); assert.equal(pending.expectedPauseGeneration, 2);
+    await assert.rejects(client.runToAuthoredStep(source, source.authoredMappings[0]), /pending command/);
+    await client.command('', {}, true);
+    assert.deepEqual(calls[2][2], calls[3][2]); assert.equal(client.state.session.status, 'running');
+    assert.equal(calls.filter(call => call[2]?.action === 'setBreakpoints').length, 1); client.dispose();
+});
+
+test('a queued run-to-step breakpoint confirms on retry without automatically resuming', async () => {
+    let requests = 0;
+    const { client, calls, scheduled } = fixture({ breakpointCommand: () => ++requests === 1 ? { status: 'pending' } : { status: 'completed' } });
+    await client.arm({ channelId: 'channel-1' });
+    const source = authoredSource(); displayRunTarget(client, source);
+    assert.equal(await client.runToAuthoredStep(source, source.authoredMappings[0]), null);
+    assert.equal(client.state.pending.action, 'setBreakpoints');
+    assert.deepEqual(client.state.breakpoints, {});
+    const retry = [...scheduled.values()].find(timer => timer.ms === 250);
+    assert(retry); retry.fn();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(client.state.pending, null);
+    assert.equal(client.state.breakpoints.src[0].line, 6);
+    assert.equal(client.state.session.status, 'paused');
+    assert.equal(calls.filter(call => call[2]?.action === 'continue').length, 0);
+    await client.runToAuthoredStep(source, source.authoredMappings[0]);
+    assert.equal(requests, 2);
+    assert.equal(calls.filter(call => call[2]?.action === 'continue').length, 1);
+    client.dispose();
+});

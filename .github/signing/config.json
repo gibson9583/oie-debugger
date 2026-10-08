@@ -1,0 +1,7 @@
+{
+  "bundle": "package/target/oie-debugger-*.zip",
+  "jars": [
+    "oie-debugger/libs/oie-debugger-shared-*.jar",
+    "oie-debugger/libs/oie-debugger-server-*.jar"
+  ]
+}

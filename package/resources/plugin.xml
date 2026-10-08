@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pluginMetaData path="oie-debugger">
+    <name>JavaScript Debugger</name>
+    <author>Open Integration Engine</author>
+    <pluginVersion>${project.version}</pluginVersion>
+    <mirthVersion>${plugin.supported.oie.versions}</mirthVersion>
+    <url>https://github.com/gibson9583/oie-debugger</url>
+    <description>Headless JavaScript debugging with browser breakpoints, stepping, frames, inspection and privileged evaluation.</description>
+    <serverClasses><pluginClass><name>org.openintegrationengine.debugger.DebuggerPlugin</name></pluginClass></serverClasses>
+    <controllerClasses><pluginClass>
+        <name>org.openintegrationengine.debugger.engine.DebugContextFactoryController</name>
+        <conditionClass>org.openintegrationengine.debugger.engine.DebugControllerCondition</conditionClass>
+        <weight>1</weight>
+    </pluginClass></controllerClasses>
+    <apiProvider type="SERVLET_INTERFACE" name="org.openintegrationengine.debugger.api.DebuggerServletInterface" />
+    <apiProvider type="SERVER_CLASS" name="org.openintegrationengine.debugger.api.DebuggerServlet" />
+    <library type="SHARED" path="libs/oie-debugger-shared-${project.version}.jar" />
+    <library type="SERVER" path="libs/oie-debugger-server-${project.version}.jar" />
+</pluginMetaData>

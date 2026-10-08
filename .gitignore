@@ -1,0 +1,23 @@
+# Generated build/dependency output
+target/
+node_modules/
+__pycache__/
+/package/webadmin/web/plugin.js
+.DS_Store
+*.log
+
+# Local configuration and signing material
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+
+# Keep machine-specific validation evidence outside the repository
+/test-results/
+/docs/deployments/
+/docs/screenshots/evidence/
+/docs/screenshots/usability/evidence/

@@ -1,0 +1,8 @@
+{
+  "id": "debugger",
+  "name": "JavaScript Debugger",
+  "version": "1.0.0",
+  "description": "Debug deployed channel JavaScript with breakpoints, stepping, frames, maps, watches and explicit evaluation controls.",
+  "oie": {"apiMin": "4.7"},
+  "client": {"entry": "web/plugin.js"}
+}
