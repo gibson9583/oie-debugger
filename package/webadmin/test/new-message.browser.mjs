@@ -9,7 +9,7 @@ const mock = `
 import React from 'react';
 import {createRoot} from 'react-dom/client';
 const mode=new URLSearchParams(location.search).get('mode');
-let target={channelId:'channel-1',messageId:'17',connectorId:2},session,serial=0;
+let target={channelId:'channel-1',...(mode==='new-message'?{}:{messageId:'17'}),connectorId:2},session,serial=0;
 const calls=[],user={id:'user-1'},listeners=[];
 const fixture=window.fixture={calls,target:()=>target,setPaused:()=>{session.status='paused';},logout:()=>{user.id='user-2';listeners.forEach(fn=>fn());}};
 const source={id:'source-1',name:'transformer_2',kind:'transformer',hash:'hash',generation:1,text:'value;',lineCount:1,breakableLines:[1],authoredMappings:[]};
@@ -25,7 +25,7 @@ const bundle=await build({stdin:{contents:`import {register} from ${JSON.stringi
 const server=createServer((req,res)=>{res.setHeader('Content-Type',req.url==='/main.js'?'application/javascript':'text/html');res.end(req.url==='/main.js'?bundle.outputFiles[0].text:'<!doctype html><html><body><div id="root"></div><script type="module" src="/main.js"></script></body></html>');});
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 let browser;
-const draft='MSH|^~\\&|SYNTHETIC\nPID|1';
+const draft='  {"id": 17, "value": "hello"}\n';
 async function armed(mode='') {
  const page=await browser.newPage();
  page.setDefaultTimeout(10000);
@@ -36,15 +36,37 @@ async function armed(mode='') {
  await page.getByLabel('Maximum pause (seconds)',{exact:true}).fill('45');
  await page.getByRole('button',{name:'Arm debugger',exact:true}).click();
  await page.locator('.dbg-send textarea').fill(draft);
- assert.equal(await page.getByRole('button',{name:'Send test message',exact:true}).isDisabled(),true);
+ assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
  assert.equal(await page.getByLabel('Message ID (optional)',{exact:true}).count(),0);
  return page;
 }
 try {
  browser=await chromium.launch({headless:true});
- let page=await armed();
+ let page=await browser.newPage();
+ await page.goto(`http://127.0.0.1:${server.address().port}/?mode=new-message`);
+ const input=page.getByRole('textbox',{name:'Message',exact:true});
+ const submit=page.getByRole('button',{name:'Send message',exact:true});
+ assert.equal(await input.inputValue(),'');
+ assert.equal(await submit.isDisabled(),true);
+ assert.deepEqual(await page.locator('.dbg-send button').allTextContents(),['Send message']);
+ await page.getByRole('button',{name:'Arm debugger',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('.dbg-status')?.textContent==='armed');
+ assert.equal(await input.inputValue(),'');
+ assert.equal(await submit.isDisabled(),true);
+ await input.fill(' \n ');
+ assert.equal(await submit.isDisabled(),true);
+ const messages=[draft,'<message id="18">Hello &amp; goodbye</message>\n','  Plain text: café 日本語 😀\nSecond line\t  '];
+ for (const message of messages) {
+   await input.fill(message);
+   await submit.click();
+   await page.waitForFunction(()=>!document.querySelector('.dbg-send button[type="submit"]').disabled);
+ }
+ assert.deepEqual(await page.evaluate(()=>fixture.calls.filter(call=>call[0]==='SEND')),messages.map(message=>['SEND','channel-1',message,null,[]]));
+ await page.close();
+
+ page=await armed();
  await page.getByRole('button',{name:'Arm for a new message',exact:true}).click();
- const send=page.getByRole('button',{name:'Send test message',exact:true});
+ const send=page.getByRole('button',{name:'Send message',exact:true});
  await page.waitForFunction(()=>!document.querySelector('.dbg-send button[type="submit"]').disabled);
  assert.equal(await page.locator('.dbg-send textarea').inputValue(),draft);
  const beforeSend=await page.evaluate(()=>({calls:fixture.calls,target:fixture.target()}));
@@ -67,7 +89,7 @@ try {
  assert.equal(await page.evaluate(()=>fixture.calls.filter(call=>call[0]==='POST'&&call[1].endsWith('/sessions')).length),1);
  assert.equal(await page.evaluate(()=>fixture.target().messageId),'17');
  assert.equal(await page.locator('.dbg-send textarea').inputValue(),draft);
- assert.equal(await page.getByRole('button',{name:'Send test message',exact:true}).isDisabled(),true);
+ assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
  await page.close();
 
  page=await armed('deferred-delete');

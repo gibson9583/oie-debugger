@@ -41,7 +41,7 @@ jobs:
           ], text=True, timeout=60))
           if any(release['tag_name'] == os.environ['GITHUB_REF_NAME']
                  for page in pages for release in page):
-              raise SystemExit('A release already exists for this tag. See docs/releasing.md; existing assets will not be replaced.')
+              raise SystemExit('A release already exists for this tag. Existing assets will not be replaced.')
           PYTHON
 
       - name: Set up JDK 11 for CodeSignTool

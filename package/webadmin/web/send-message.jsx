@@ -1,6 +1,6 @@
 import { platform } from '@oie/web-shell';
 import { ownerContext } from './debugger-client.js';
-import { HL7_SAMPLE, TestMessageSender, messageSendAccess, sendUnavailableReason } from './test-message-sender.js';
+import { TestMessageSender, messageSendAccess, sendUnavailableReason } from './test-message-sender.js';
 
 const React = platform.React;
 const { useEffect, useRef, useState } = React;
@@ -50,13 +50,12 @@ export function SendMessage({ channelId, channelName, session, getSession, valid
     };
 
     return <section className="dbg-send" aria-labelledby="dbg-send-title">
-        <h2 id="dbg-send-title">Send a test message</h2>
+        <h2 id="dbg-send-title">Send a message</h2>
         <p className="dbg-muted">Send through {channelName || 'the selected channel'} and all enabled destinations. Stay on this screen to keep the debugger armed.</p>
         <form onSubmit={submit} className="dbg-form">
-            <label className="dbg-field">Raw message<textarea rows={5} value={draft} onChange={event => setDraft(event.target.value)} disabled={locked} spellCheck={false} placeholder="Paste a test message, or load the synthetic HL7 sample." /></label>
+            <label className="dbg-field">Message<textarea rows={5} value={draft} onChange={event => setDraft(event.target.value)} disabled={locked} spellCheck={false} placeholder="Enter or paste a message in the format expected by this channel." /></label>
             <div className="dbg-row">
-                <button type="button" disabled={locked} onClick={() => { setDraft(HL7_SAMPLE); setError(''); }}>Load HL7 sample</button>
-                <button type="submit" className="dbg-primary" disabled={locked || !!reason || !draft.trim()}>{sending ? 'Waiting for message…' : 'Send test message'}</button>
+                <button type="submit" className="dbg-primary" disabled={locked || !!reason || !draft.trim()}>{sending ? 'Sending…' : 'Send message'}</button>
                 {messageFilter.trim() && onArmNewMessage && <button type="button" disabled={disabled || sending || unknown || !canArmNewMessage} title="End this session and remove its Message ID filter. Your draft is kept." onClick={onArmNewMessage}>Arm for a new message</button>}
                 {!sending && !unknown && reason && <span className="dbg-muted">{reason}</span>}
             </div>

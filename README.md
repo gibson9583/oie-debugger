@@ -1,92 +1,71 @@
 # OIE JavaScript Debugger
 
-A headless Rhino debugger for Open Integration Engine with a dedicated Web Administrator screen. Version **1.0.0 is unreleased**.
-
-The plugin uses the engine's Rhino, Jackson and authorization APIs and the Web Administrator's React and Monaco editor. No engine or web-client source changes are required, and no duplicate Rhino or React runtime is packaged.
+Debug JavaScript running in Open Integration Engine channels from Web Administrator.
 
 ## Features
 
-- Executable-line breakpoints, hit counts, pause on entry or exceptions, and continue/step into/over/out.
-- Exact compiled source, call frames, and bounded previews of locals, messages, E4X XML/XMLList and maps. Inspection does not invoke JavaScript getters or arbitrary Java conversion methods.
-- Optional watches, evaluation, breakpoint conditions and variable editing on the paused worker, with separate permission and session opt-in.
-- Channel, message, connector and source filters; channel/message actions; verified navigation to authored scripts and transformer steps.
-- Owner/tab isolation, generation-checked commands, idempotent retries, pause limits and renewable ownership leases.
+- Pause at breakpoints, script entry, or exceptions.
+- Continue execution or step into, over, and out of functions.
+- Inspect deployed scripts, the call stack, variables, message content, and maps.
+- Use watch expressions, conditional breakpoints, and variable editing with evaluation enabled.
+- Send a message in the format expected by the selected channel.
+- Limit debugging to a channel, message, connector, or script.
 
-See the [HL7v2 playground](examples/hl7v2-debugger/README.md) for an importable channel and synthetic message.
+## Installation
 
-## Build and install
+Requires Java 17+, OIE 4.6.0, and Web Administrator plugin API 4.7 or newer. Plugin discovery requires native web-support endpoints or the Web Support extension.
 
-Requires Java 17+, Maven, OIE 4.6.0 build artifacts or an installed distribution, Web Administrator plugin API 4.7 or newer, and access to Maven/npm dependency repositories. Maven installs a private Node runtime and builds/tests the browser bundle.
+1. Download the plugin ZIP from [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases).
+2. Install it through the engine's extension installer.
+3. Set `rhino.optimizationlevel=-1` in the engine configuration and restart the engine.
+4. Reload Web Administrator and open **Monitor → Debugger**.
 
-```sh
-ENGINE_DIR=/path/to/oie bash scripts/install-engine-jars.sh
-mvn clean package
-```
-
-Install `package/target/oie-debugger-1.0.0.zip` through the engine's extension installer, restart the engine, and reload Web Administrator. Automatic discovery requires native web-support endpoints or the Web Support extension.
-
-The engine must use `rhino.optimizationlevel=-1`. Compatibility checks refuse interception when the engine internals or interpreter mode cannot be verified, or another enabled extension controls context factories. The build targets the engine's Rhino 1.7.13 API; validate compatibility again when upgrading the engine. Native Swing debug factories are excluded.
-
-If channels compiled while the debugger was disabled, redeploy them after enabling it so their exact compiled sources can be captured.
+Redeploy channels that were compiled while the debugger was disabled so their scripts become available.
 
 ## Debug a message
 
-1. Open **Monitor → Debugger**, or use **Debug Channel** from the Channels page. Select a test channel and optional connector. Leave Message ID empty for a new message.
-2. Keep **Break on entry** selected and click **Arm debugger**. Paste a payload under **Send a test message**, or use **Load HL7 sample**, then send it without leaving the screen.
-3. When paused, select a **Script step** and choose **Run to selected step**. This sets an ordinary breakpoint at the step's first executable line and continues to it. Earlier breakpoints may stop first, and control flow may skip the step.
-4. Use **Step over** to execute the highlighted assignment and inspect its result in **Variables and maps**. Continue through remaining stops until processing finishes.
-5. Send another message using the same armed session, or choose **End session**. To change settings, end the session first; **Clear session** restores the options after a session has expired or closed.
+1. Select a channel. Leave **Message ID** empty to send a new message.
+2. Select **Break on entry** and click **Arm debugger**.
+3. Enter your message under **Send a message**, then click **Send message**. The message runs through the selected channel and all enabled destinations.
+4. When execution pauses, inspect **Variables and maps** and use the controls below.
+5. Choose **End session** when finished. End or clear the session before changing its settings.
 
-Stay on the Debugger screen while debugging: navigation releases the session. Selecting an existing Message ID does not send or reprocess it. The inline sender uses the native message API and sends through all enabled destinations.
-
-Break on entry applies to each newly claimed matching execution, including subsequent messages. Nested function calls do not add entry stops. A session owns one execution at a time; concurrent messages can run through while it is occupied.
-
-Generated source remains authoritative and read-only. Authored mappings are navigation hints supplied only when verifiable. Monaco gutter breakpoints and accessible line controls both target the compiled source hash and generation. If a command response is lost, resolve its pending receipt before another command; retries reuse the original command ID.
-
-## Access and configuration
-
-Engine operation permissions and channel authorization govern access. With RBAC installed, administrators receive the debugger permissions automatically; other roles need **View JavaScript Debugger**, **Control JavaScript Debugger**, and, for expression features, **Evaluate JavaScript Debugger**.
-
-The **JavaScript Debugger** extension properties can impose additional restrictions:
-
-| Property | Meaning |
+| Control | Action |
 | --- | --- |
-| `enabled` | `false` denies all debugger access. |
-| `evaluationEnabled` | `false` disables expression features for everyone. New installations enable the feature, subject to permission and session opt-in. |
-| `allowedUserIds` | Optional comma-separated numeric engine user IDs permitted to use the debugger. |
-| `allowedChannelIds` | Optional comma-separated channel IDs; `*` removes this additional channel restriction. |
-| `evaluationUserIds` | Optional additional user restriction for expression features. |
-| `globalUserIds` | Optional additional user restriction for global/lifecycle debugging. |
+| Continue | Run until the next stop or the script finishes. |
+| Step over | Advance to the next executable line in the current function, running called functions along the way. |
+| Step into | Advance to the next executable line, entering a called JavaScript function when possible. |
+| Step out | Run until the current function returns. |
+| Pause next line | Request a pause at the next executable line. |
+| Run to selected step | Set a breakpoint at the selected script step and continue toward it. Earlier breakpoints or control flow may stop execution elsewhere. |
 
-Blank lists impose no additional restriction. Nonempty lists also restrict administrators and never grant otherwise-denied engine permissions. User wildcards are unsupported. Global/lifecycle access requires control permission, no engine channel restrictions, and explicit opt-in. A message filter never matches a script without message identity.
+Breakpoints and exceptions can interrupt stepping. **Break on entry** can pause separately in source and destination scripts, even without breakpoints. **Armed** means the debugger is waiting for another matching script; it does not confirm that the entire message has finished.
 
-Manage these properties through the engine's standard extension properties API, for example `PUT /api/extensions/JavaScript%20Debugger/properties?mergeProperties=true`. Reinstallation preserves stored settings, including evaluation being disabled. Policy changes close existing sessions. Every operation rechecks authorization and session ownership.
+Stay on the Debugger screen while debugging; leaving it ends the session. A session debugs one execution at a time, so concurrent messages may run without pausing. The displayed source is read-only and comes from the deployed channel.
 
-## Execution limits
+Selecting an existing **Message ID** does not send or reprocess that message. Choose **Arm for a new message** to remove that filter before sending a new message.
 
-Pausing may hold a transaction or processing permit, and upstream timeouts can trigger retries. Use selected development/test traffic. The debugger cannot undo sends, roll back effects, replace running code, reverse execution or step Java/JVM instructions.
+## Access and settings
 
-The ownership lease defaults to 15 seconds. The UI defaults to a 120-second maximum pause; the server default is 60 seconds and hard maximum is 120 seconds. Connection loss stops lease renewal. Channel stop/pause notifications close existing sessions so queued work can drain. To debug an undeploy script, stop the channel, arm a new lifecycle-enabled session, then undeploy.
+Users need **View JavaScript Debugger** to inspect scripts, **Control JavaScript Debugger** to control execution, and **Evaluate JavaScript Debugger** for expression features. Sending requires **Send Message** permission. Existing channel permissions also apply.
 
-Watches, conditions, evaluation and value edits execute JavaScript with engine privileges and may change data or call external systems. Their Rhino callback/time budget is best effort: tight loops without callbacks and Java/native calls cannot be forcibly cancelled.
+The **JavaScript Debugger** extension properties provide additional restrictions:
 
-Source, inspection and breakpoints belong to specific source/pause generations. Redeployment, resource changes, expired leases or changed permissions can require a new session. Exact source remains available while its compiled script is live; extra recent-source retention is capped at 256 records or 16 million characters. Live source memory scales with live compiled scripts. Dynamic `eval`/`Function` source access requires the owning tab's active pause. Shared-map previews are bounded observations, not an engine-wide consistent snapshot.
+| Property | Setting |
+| --- | --- |
+| `enabled` | Set to `false` to disable debugger access. |
+| `evaluationEnabled` | Set to `false` to disable watches, conditional expressions, evaluation, and value editing. |
+| `allowedUserIds` | Comma-separated numeric engine user IDs allowed to use the debugger. |
+| `allowedChannelIds` | Comma-separated channel IDs, or `*` for no additional channel restriction. |
+| `evaluationUserIds` | Additional user restriction for expression features. |
+| `globalUserIds` | Additional user restriction for global and lifecycle scripts. |
 
-## Development
+Blank lists add no restriction. Nonempty lists also restrict administrators and do not grant engine permissions. User lists do not support wildcards. Global and lifecycle debugging requires unrestricted channel access, control permission, and session opt-in. Evaluation must also be enabled for the session. Changing access settings closes existing sessions.
 
-```sh
-mvn -pl server -am test
-cd package/webadmin
-npm ci
-npm test
-npx playwright install --with-deps chromium
-npm run test:browser
-```
+## Limits
 
-Tests cover real Rhino execution, source retention, lifecycle attachment, API permissions and ownership, source mapping, inspection and frontend ordering. See the [web plugin development guide](package/webadmin/README.md) for browser regressions. Development screenshots, deployment receipts and machine-specific validation logs are kept outside this repository.
+Use development or test traffic. Pausing can hold transactions and cause upstream timeouts or retries. Pauses last at most 120 seconds; a lost connection also releases paused execution after the session expires.
 
-## Releases and license
-
-GitHub Actions builds and tests pull requests and `main`. Version tags run the same checks, sign both plugin JARs with SSL.com, and publish the installable ZIP with checksums. See [building and releasing](docs/releasing.md) for signing configuration and publication steps.
+Watches, conditions, and value edits run JavaScript with engine privileges and may change data or call external systems. Blocking Java calls and scripts without debugger callbacks cannot always be interrupted. The debugger cannot undo processing, reverse execution, or step through Java code. Shared maps may change while another worker runs.
 
 Licensed under the [Mozilla Public License 2.0](LICENSE).
