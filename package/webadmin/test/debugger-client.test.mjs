@@ -172,6 +172,93 @@ test('server closure retains historical settings and rearming replaces the messa
     assert.equal(client.state.armOptions, null);
 });
 
+test('confirmed closed sessions clear locally after server eviction and can rearm without old state', async () => {
+    let arms = 0;
+    const { client, calls, scheduled } = fixture({
+        post: (path, body) => path === '/sessions' ? session({ id: `s-${++arms}` })
+            : { status: body.action === 'evaluate' ? 'pending' : 'completed' },
+        get: () => session({ status: 'closed', closeReason: 'Maximum pause duration reached' }),
+        del: () => { throw Object.assign(new Error('Debug session is unavailable to this owner/tab'), { status: 403 }); },
+    });
+    await client.arm({ channelId: 'channel-1', messageId: '17', evaluationEnabled: true });
+    await client.setBreakpoints({ id: 'source', hash: 'hash', generation: 1, breakableLines: [2] }, [{ line: 2 }]);
+    await client.command('evaluate', { expression: 'value', frameIndex: 0 });
+    assert.equal(client.state.pending.action, 'evaluate');
+    assert.equal(scheduled.size, 3);
+    await client.poll();
+    assert.equal(client.state.session.status, 'closed');
+    assert.equal(client.state.receipt.status, 'pending');
+    assert.equal(client.state.breakpoints.source.length, 1);
+    const closedEpoch = client.epoch, count = calls.length;
+
+    await client.disarm();
+    assert.equal(calls.length, count, 'Clear must not depend on the evicted server record');
+    assert.equal(client.epoch, closedEpoch + 1, 'Clear fences work started against the old session');
+    assert.equal(scheduled.size, 0);
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.armOptions, null);
+    assert.equal(client.state.receipt, null);
+    assert.equal(client.state.pending, null);
+    assert.deepEqual(client.state.breakpoints, {});
+    assert.equal(client.state.error, '');
+    assert.equal(client.state.lost, false);
+    assert.equal(client.state.busy, false);
+    await client.disarm();
+    assert.equal(calls.length, count, 'Repeated Clear is a local no-op');
+    await client.arm({ channelId: 'channel-1' });
+    assert.equal(client.state.session.id, 's-2');
+    assert.deepEqual(client.state.armOptions, { channelId: 'channel-1' });
+    assert.equal(scheduled.size, 2);
+    assert.equal(calls.filter(call => call[0] === 'del').length, 0);
+    client.dispose();
+});
+
+test('local clearing still rejects a changed owner and fences old source responses after rearm', async () => {
+    const detail = deferred();
+    const { client, calls, owner } = fixture({ get: path => path.includes('/sources/') ? detail.promise : session({ status: 'closed' }) });
+    await client.arm({ channelId: 'channel-1' });
+    await client.poll();
+    const closed = client.state, closedEpoch = client.epoch, count = calls.length;
+    owner('engine-b/user-a');
+    await assert.rejects(client.disarm(), /engine or login changed/);
+    assert.equal(client.state, closed);
+    assert.equal(client.epoch, closedEpoch);
+    assert.equal(calls.length, count);
+    owner('engine-a/user-a');
+    const loading = client.source('source', 'channel-1');
+    await client.disarm();
+    await client.arm({ channelId: 'channel-1' });
+    detail.resolve({ id: 'source', text: 'old session source' });
+    await loading;
+    assert.equal(client.state.source, null, 'A source response from before Clear cannot update the new session');
+    assert.equal(client.state.session.status, 'paused');
+    assert.equal(calls.filter(call => call[0] === 'del').length, 0);
+    client.dispose();
+});
+
+test('active session close failures retain the lease and prevent a second arm even for an unavailable response', async () => {
+    for (const status of ['armed', 'running', 'paused']) {
+        for (const failure of [new Error('close outcome unknown'), Object.assign(new Error('Debug session is unavailable to this owner/tab'), { status: 403 })]) {
+            const { client, calls, scheduled } = fixture({
+                post: () => session({ status }),
+                del: () => { throw failure; },
+            });
+            await client.arm({ channelId: 'channel-1' });
+            const active = client.state.session, options = client.state.armOptions;
+            await client.disarm();
+            assert.equal(calls.filter(call => call[0] === 'del').length, 1, 'Active sessions still require DELETE');
+            assert.equal(client.state.session, active);
+            assert.equal(client.state.armOptions, options);
+            assert.equal(client.state.lost, true);
+            assert.equal(client.state.busy, false);
+            assert.equal(scheduled.size, 0);
+            await client.arm({ channelId: 'channel-1' });
+            assert.equal(calls.filter(call => call[0] === 'post' && call[1] === '/sessions').length, 1);
+            client.dispose();
+        }
+    }
+});
+
 test('late successful arming after unmount releases the created session without reviving it', async () => {
     const pending = deferred();
     const { client, calls, scheduled } = fixture({ post: () => pending.promise });

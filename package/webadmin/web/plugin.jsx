@@ -249,7 +249,7 @@ function DebuggerView() {
         {available && capabilities.controlAllowed === false && <div className="dbg-notice" role="status">Your account can read deployed sources. Debugger control permission is required to arm, pause or change an execution.</div>}
         {state?.pending && <div className="dbg-notice" role="status">The command is pending or its response was interrupted. Checking reuses its original command ID. <button disabled={blocked} onClick={() => act(() => client.command('', {}, true))}>Check command result</button></div>}
         {session ? <SessionSettings state={state} channelName={channels.find(c => c.id === session.channelId)?.name} /> : <form onSubmit={arm}>
-            <fieldset className="dbg-target" disabled={blocked || !available || !!session || capabilities?.controlAllowed === false}><legend>Target execution</legend>
+            <fieldset className="dbg-target" disabled={blocked || !available || !!session}><legend>Target execution</legend>
                 <div className="dbg-fields">
                     <label className="dbg-field">Channel<select required value={channelId} onChange={e => setChannelId(e.target.value)}><option value="">Select a channel</option>{channels.map(c => <option key={c.id} value={c.id}>{c.name || c.id}</option>)}{channelId && channelId !== 'global' && !channels.some(c => c.id === channelId) && <option value={channelId}>{channelId}</option>}<option value="global" disabled={!capabilities?.globalAllowed}>Global scripts</option></select></label>
                     <label className="dbg-field">Message ID (optional)<input value={messageId} onChange={e => setMessageId(e.target.value)} inputMode="numeric" placeholder="Next matching message" /></label>
@@ -260,7 +260,7 @@ function DebuggerView() {
                 {evaluationUnavailable && <p id="dbg-evaluation-help" className="dbg-muted dbg-options-help">{evaluationUnavailable}</p>}
                 <details><summary>Limit the script surface</summary><div className="dbg-fields" style={{ marginTop: 10 }}><label className="dbg-field">Script kind<input value={scriptKind} onChange={e => setScriptKind(e.target.value)} list="dbg-kinds" placeholder="All JavaScript surfaces" /><datalist id="dbg-kinds">{[...new Set(state?.sources.map(s => s.kind).filter(Boolean) || [])].map(kind => <option key={kind} value={kind} />)}</datalist></label><label className="dbg-field">Exact deployed source<select value={targetSource} onChange={e => setTargetSource(e.target.value)}><option value="">Any source in the target</option>{state?.sources.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label></div></details>
                 {(lifecycle || evaluation) && <p className="dbg-notice dbg-warning" style={{ marginTop: 12 }}>{lifecycle ? 'Lifecycle and global pauses can delay deploy, undeploy and administration. ' : ''}{evaluation ? 'Watches, conditions and value edits execute JavaScript with engine privileges and may change data or call external systems. Elevated access is required.' : ''}</p>}
-                <div className="dbg-row" style={{ marginTop: 14 }}><button type="submit" className="dbg-primary" disabled={!channelId || (channelId === 'global' && !lifecycle)}>Arm debugger</button><p className="dbg-muted">Use development or test channels. Pausing can hold transactions and cause senders to retry.</p></div>
+                <div className="dbg-row" style={{ marginTop: 14 }}><button type="submit" className="dbg-primary" disabled={capabilities?.controlAllowed === false || !channelId || (channelId === 'global' && !lifecycle)}>Arm debugger</button><p className="dbg-muted">Use development or test channels. Pausing can hold transactions and cause senders to retry.</p></div>
             </fieldset>
         </form>}
         {closed && <p role="status">Session ended: {session.closeReason || session.reason || 'execution released'}. Clear the session to arm again.</p>}
@@ -299,7 +299,7 @@ function DebuggerView() {
 
 export function register(host = platform) {
     if (!document.getElementById(STYLE_ID)) { const style = document.createElement('style'); style.id = STYLE_ID; style.textContent = css; document.head.appendChild(style); }
-    host.registerIcon('debugger', 'M8 4h8v4H8z M6 10h12v10H6z M3 12h3 M18 12h3 M3 17h3 M18 17h3 M10 12v5 M14 12v5');
+    host.registerIcon('debugger', 'M8 8V3l14 8-7 4M5 13v-1a2 2 0 0 1 4 0v1M4 13h6v5a3 3 0 0 1-6 0zM7 13v8M4 15H2M10 15h2M4 18H2M10 18h2M4.8 20 3 22M9.2 20 11 22');
     host.registerView('/debugger', host.reactView(DebuggerView), { title: 'JavaScript Debugger' });
     host.registerNavItem({ id: 'debugger', label: 'Debugger', icon: 'debugger', path: '/debugger', section: 'Monitor', order: 80 });
     const open = target => { host.store.setState('debuggerTarget', target); host.router.navigate('/debugger'); };

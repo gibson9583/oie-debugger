@@ -156,13 +156,15 @@ export class DebuggerClient {
     }
     async disarm() {
         this.assert();
-        const id = this.state.session?.id;
-        if (!id) return;
+        const session = this.state.session;
+        if (!session?.id) return;
         this.clearTimers();
         const epoch = ++this.epoch;
         this.emit({ busy: true, pending: null });
         try {
-            await this.api.del(`/sessions/${enc(id)}`, { tabId: this.tabId });
+            // A confirmed closed session is already released and may have been
+            // evicted from the engine's short-lived session history.
+            if (session.status !== 'closed') await this.api.del(`/sessions/${enc(session.id)}`, { tabId: this.tabId });
             if (this.valid(epoch)) this.emit({ session: null, armOptions: null, receipt: null, error: '', lost: false, breakpoints: {} });
         } catch (e) { if (this.valid(epoch)) this.lose(e); }
         finally { if (this.valid(epoch)) this.emit({ busy: false }); }

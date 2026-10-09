@@ -303,6 +303,63 @@ class DebugRuntimeTest {
         receipt(id, command(paused, "continue", Map.of())); assertEquals(1.0, result.get(2, TimeUnit.SECONDS));
     }
 
+    @Test void nativeLinkageFailuresBecomeWatchAndCommandErrorsWithoutAbortingTheScript() throws Exception {
+        String id = create(Map.of("evaluationEnabled", true, "breakOnEntry", false, "pauseOnExceptions", true,
+                "watches", List.of("nativeFailure.fail()", "local")));
+        Future<Object> result = runWithNativeFailure(compile("var local=41;\ndebugger;\nlocal+1;", "transformer"),
+                new NoClassDefFoundError("missing.OptionalLibrary"));
+        Map<String, Object> paused = awaitPause(id, 1);
+        List<?> watches = (List<?>) paused.get("watches");
+        assertTrue(((Map<?, ?>) watches.get(0)).get("error").toString().contains("NoClassDefFoundError"));
+        assertEquals(41.0, ((Map<?, ?>) ((Map<?, ?>) watches.get(1)).get("result")).get("value"));
+        for (String action : List.of("evaluate", "setValue")) {
+            Map<String, Object> fields = action.equals("evaluate") ? Map.of("expression", "nativeFailure.fail()")
+                    : Map.of("name", "local", "valueExpression", "nativeFailure.fail()");
+            Map<String, Object> request = command(paused, action, fields);
+            Map<String, Object> failed = receipt(id, request);
+            assertEquals("completed", failed.get("status"));
+            assertTrue(failed.get("error").toString().contains("NoClassDefFoundError"));
+            assertEquals(failed, runtime.command(OWNER, id, request), "Retry must return the terminal error receipt");
+        }
+        Map<String, Object> evaluated = receipt(id, command(paused, "evaluate", Map.of("expression", "local+1")));
+        assertEquals(42.0, ((Map<?, ?>) evaluated.get("result")).get("value"));
+        receipt(id, command(paused, "continue", Map.of()));
+        assertEquals(42.0, result.get(2, TimeUnit.SECONDS));
+        assertEquals(1L, runtime.session(OWNER, id, TAB).get("pauseGeneration"));
+    }
+
+    @Test void nativeLinkageFailureInConditionDoesNotAbortTheScriptOrDisableLaterBreakpoints() throws Exception {
+        Script script = compile("var local=41;\nlocal+1;", "transformer");
+        assertEquals(42.0, runWithNativeFailure(script, new NoClassDefFoundError()).get(2, TimeUnit.SECONDS));
+        Map<String, Object> source = runtime.sources(CHANNEL).get(0);
+        String id = create(Map.of("evaluationEnabled", true, "breakOnEntry", false));
+        Map<String, Object> fields = new HashMap<>(Map.of("sourceId", source.get("id"), "sourceHash", source.get("hash"),
+                "sourceGeneration", source.get("generation"), "lines", List.of(Map.of("line", 2, "condition", "nativeFailure.fail()"))));
+        setBreakpoints(id, fields);
+        assertEquals(42.0, runWithNativeFailure(script, new NoClassDefFoundError()).get(2, TimeUnit.SECONDS));
+        Map<String, Object> state = runtime.session(OWNER, id, TAB);
+        assertEquals("armed", state.get("status")); assertEquals(0L, state.get("pauseGeneration"));
+        assertEquals("Breakpoint condition failed: NoClassDefFoundError", state.get("lastError"));
+        fields.put("lines", List.of(Map.of("line", 2, "condition", "true")));
+        setBreakpoints(id, fields);
+        Future<Object> result = runWithNativeFailure(script, new NoClassDefFoundError());
+        Map<String, Object> paused = awaitPause(id, 1); assertEquals("breakpoint", paused.get("reason"));
+        receipt(id, command(paused, "continue", Map.of())); assertEquals(42.0, result.get(2, TimeUnit.SECONDS));
+    }
+
+    @Test void nativeHaltAndFatalErrorsDuringEvaluationStillPropagate() throws Exception {
+        for (Error failure : List.of(new Error("engine halted"), new AssertionError("native assertion"),
+                new OutOfMemoryError("synthetic fatal error"), new ThreadDeath())) {
+            String id = create(Map.of("evaluationEnabled", true, "breakOnEntry", false));
+            Future<Object> result = runWithNativeFailure(compile("debugger;\n42;", "transformer"), failure);
+            Map<String, Object> paused = awaitPause(id, 1);
+            runtime.command(OWNER, id, command(paused, "evaluate", Map.of("expression", "nativeFailure.fail()")));
+            ExecutionException thrown = assertThrows(ExecutionException.class, () -> result.get(2, TimeUnit.SECONDS));
+            assertSame(failure, thrown.getCause(), "Only recoverable linkage failures should become expression errors");
+            runtime.close(OWNER, id, TAB);
+        }
+    }
+
     @Test void evaluationAndValueEditingPreservePausedMethodReceiverAndLocals() throws Exception {
         String id = create(Map.of("evaluationEnabled", true, "breakOnEntry", false));
         Script script = compile("var object={value:9,run:function(){\nvar local=2;\ndebugger;\nreturn local + this.value;\n}};\nobject.run();", "transformer");
@@ -537,6 +594,18 @@ class DebugRuntimeTest {
     }
 
     private Script compile(String text, String name) { return factory.call(cx -> cx.compileString(text, name, 1, null)); }
+    public static final class NativeFailure {
+        private final Error failure;
+        NativeFailure(Error failure) { this.failure = failure; }
+        public void fail() { throw failure; }
+    }
+    private Future<Object> runWithNativeFailure(Script script, Error failure) {
+        return workers.submit(() -> factory.call(cx -> {
+            Scriptable scope = cx.initStandardObjects(); ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            ScriptableObject.putProperty(scope, "nativeFailure", Context.javaToJS(new NativeFailure(failure), scope));
+            return script.exec(cx, scope);
+        }));
+    }
     private Future<Object> run(Script script, String channel) { return run(script, channel, null); }
     private Future<Object> run(Script script, String channel, Object message) { return workers.submit(() -> execute(script, channel, message)); }
     private Object execute(Script script, String channel, Object message) {

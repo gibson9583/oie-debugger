@@ -10,13 +10,13 @@ const mock = `
 import React from 'react';
 import {createRoot} from 'react-dom/client';
 const mode=new URLSearchParams(location.search).get('mode');
-let target={channelId:'channel-1'},session=null,serial=0;
+let target=mode==='view-only'?null:{channelId:'channel-1'},session=null,serial=0;
 const calls=[],source={id:'source-1',name:'channel-1_transformer_0',kind:'transformer',hash:'hash',generation:1,text:'value;',lineCount:1,breakableLines:[1],authoredMappings:[]};
-window.fixture={calls,execution:()=>{session={...session,status:'running',messageId:'901',connectorId:7};},close:()=>{session={...session,status:'closed',closeReason:'maximum pause expired'};}};
+window.fixture={calls,execution:()=>{session={...session,status:'running',messageId:'901',connectorId:7};},close:()=>{session={...session,status:'closed',closeReason:'maximum pause expired'};},evict:()=>{session=null;}};
 const api={
- get:async(path)=>{calls.push(['GET',path]);if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion:1,controlAllowed:true,evaluationEnabled:mode!=='engine-disabled',evaluationAllowed:mode==='engine-disabled',globalAllowed:true});if(path.endsWith('/sources'))return JSON.stringify([source]);if(path.includes('/sources/'))return JSON.stringify(source);if(path.includes('/sessions/'))return JSON.stringify(session);throw new Error('Unexpected GET '+path);},
+ get:async(path)=>{calls.push(['GET',path]);if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion:1,controlAllowed:mode!=='view-only',evaluationEnabled:mode!=='engine-disabled',evaluationAllowed:mode==='engine-disabled',globalAllowed:mode!=='view-only'});if(path.endsWith('/sources'))return JSON.stringify([source]);if(path.includes('/sources/'))return JSON.stringify(source);if(path.includes('/sessions/'))return JSON.stringify(session);throw new Error('Unexpected GET '+path);},
  post:async(path,text)=>{const body=JSON.parse(text);calls.push(['POST',path,body]);if(path.endsWith('/sessions')){session={id:'session-'+(++serial),channelId:body.channelId,status:'armed',pauseGeneration:0,maxPauseMillis:body.maxPauseMillis,includeLifecycle:body.includeLifecycle,evaluationEnabled:body.evaluationEnabled};return JSON.stringify(session);}if(path.endsWith('/heartbeat'))return JSON.stringify(session);throw new Error('Unexpected POST '+path);},
- del:async(path)=>{calls.push(['DELETE',path]);session=null;return '{}';},
+ del:async(path)=>{calls.push(['DELETE',path]);if(!session)throw Object.assign(new Error('Debug session is unavailable to this owner/tab'),{status:403});session=null;return '{}';},
  channels:{list:async()=>[{id:'channel-1',name:'Options fixture'}]},onSessionExpired:()=>()=>{},onEngineUnknown:()=>()=>{}
 };
 export const platform={React,api,checkTask:()=>true,oie:{uuid:()=>crypto.randomUUID()},store:{getState:key=>key==='user'?{id:'user-1'}:key==='debuggerTarget'?target:null,setState:(key,value)=>{if(key==='debuggerTarget')target=value;},subscribe:()=>()=>{}},router:{navigate:()=>{}},registerIcon:()=>{},registerNavItem:()=>{},registerChannelAction:()=>{},registerMessageAction:()=>{},reactView:component=>component,registerView:(path,View)=>createRoot(document.getElementById('root')).render(React.createElement(View)),createCodeEditor:opts=>{const el=document.createElement('div'),area=document.createElement('textarea');area.readOnly=true;area.value=opts.value;el.append(area);return{el,area,dispose:()=>{}}}};
@@ -76,6 +76,19 @@ async function summary(page) {
 
 try {
     browser = await chromium.launch({ headless: true });
+    const readOnly = await browser.newPage();
+    readOnly.on('pageerror', error => errors.push(error.message));
+    await readOnly.goto(`http://127.0.0.1:${server.address().port}/?mode=view-only`);
+    await expect(readOnly.getByText('Your account can read deployed sources.', { exact: false })).toBeVisible();
+    const channel = readOnly.getByRole('combobox', { name: 'Channel', exact: true });
+    await expect(channel).toBeEnabled();
+    await channel.selectOption('channel-1');
+    await expect(readOnly.locator('.dbg-editor textarea')).toHaveValue('value;');
+    await expect(readOnly.getByRole('button', { name: 'Arm debugger', exact: true })).toBeDisabled();
+    await expect(readOnly.getByRole('button', { name: 'Pause next line', exact: true })).toBeDisabled();
+    await readOnly.getByLabel('Message ID (optional)', { exact: true }).press('Enter');
+    assert.equal(await readOnly.evaluate(() => fixture.calls.filter(call => call[0] === 'POST').length), 0);
+    await readOnly.close();
     for (const theme of ['dark', 'light']) {
         const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
         page.setDefaultTimeout(10000);
@@ -133,11 +146,15 @@ try {
         await expect(page.getByRole('heading', { name: 'Ended session settings', exact: true })).toBeVisible();
         assert.equal(await page.locator('.dbg-target').count(), 0, 'closed session retains settings summary until cleared');
         assert.deepEqual(await summary(page), expected);
+        await page.evaluate(() => fixture.evict());
         await page.getByRole('button', { name: 'Clear session', exact: true }).click();
         await expect(page.getByRole('button', { name: 'Arm debugger', exact: true })).toBeEnabled();
         await checkboxVisual(entry, false); await checkboxVisual(exceptions, true); await checkboxVisual(lifecycle, true);
         await expect(page.getByLabel('Maximum pause (seconds)', { exact: true })).toHaveValue('45');
-        assert.equal(await page.evaluate(() => fixture.calls.filter(call => call[0] === 'DELETE').length), 2);
+        assert.equal(await page.evaluate(() => fixture.calls.filter(call => call[0] === 'DELETE').length), 1, 'confirmed closed session must clear locally after server eviction');
+        await page.getByRole('button', { name: 'Arm debugger', exact: true }).click();
+        await expect(page.getByRole('button', { name: 'End session', exact: true })).toBeEnabled();
+        await page.getByRole('button', { name: 'End session', exact: true }).click();
         await page.close();
     }
     const page = await browser.newPage();
@@ -149,7 +166,7 @@ try {
     await expect(evaluation).toHaveAccessibleDescription('Evaluation is disabled in the engine settings.');
     await page.close();
     assert.deepEqual(errors, []);
-    console.log('Options browser regression passed: layered host checkbox colors in both themes; mouse, label and keyboard changes; permission help; exact arm payload and retained settings across polls, End and Clear.');
+    console.log('Options browser regression passed: view-only source browsing without arming; layered host checkbox colors in both themes; mouse, label and keyboard changes; permission help; exact arm payload and retained settings across polls, End, evicted Clear and rearm.');
 } finally {
     await browser?.close();
     await new Promise(resolve => server.close(resolve));

@@ -350,7 +350,7 @@ public final class DebugRuntime implements Debugger {
                     if (breakpoint.condition == null) reason = "breakpoint";
                     else {
                         try { if (Context.toBoolean(evaluate(context, this, breakpoint.condition))) reason = "breakpoint"; }
-                        catch (RuntimeException | EvaluationAbort failure) { synchronized (session) { session.lastError = "Breakpoint condition failed: " + failure.getClass().getSimpleName(); } }
+                        catch (RuntimeException | LinkageError | EvaluationAbort failure) { synchronized (session) { session.lastError = "Breakpoint condition failed: " + failure.getClass().getSimpleName(); } }
                     }
                 }
                 if (reason != null) pause(context, this, reason, null);
@@ -437,7 +437,7 @@ public final class DebugRuntime implements Debugger {
                     } else throw new IllegalArgumentException("Unsupported paused command");
                     synchronized (session) { pending.result = result; pending.completed = true; }
                     if (!action.equals("inspect")) updateInspection(context, frame, index);
-                } catch (RuntimeException | EvaluationAbort failure) {
+                } catch (RuntimeException | LinkageError | EvaluationAbort failure) {
                     synchronized (session) { pending.error = boundedError(failure); pending.completed = true; }
                 }
             }
@@ -472,7 +472,7 @@ public final class DebugRuntime implements Debugger {
         for (String expression : expressions) {
             if (now() > frame.session.pauseDeadline) break;
             try { watches.add(Map.of("expression", expression, "result", new SafeInspector().inspect(evaluate(context, selected, expression)))); }
-            catch (RuntimeException | EvaluationAbort failure) { watches.add(Map.of("expression", expression, "error", boundedError(failure))); }
+            catch (RuntimeException | LinkageError | EvaluationAbort failure) { watches.add(Map.of("expression", expression, "error", boundedError(failure))); }
         }
         synchronized (frame.session) { frame.session.frames = List.copyOf(frames); frame.session.inspection = inspection; frame.session.watchResults = List.copyOf(watches); }
     }
