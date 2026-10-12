@@ -148,9 +148,15 @@ public final class DebugRuntime implements Debugger {
                 synchronized (previous) { closeLocked(previous, "Arm authorization failed"); }
                 if (channelId.equals(previous.channel) && previous.creationOptions.equals(options))
                     throw new ArmRequestRejected(requestId, denied);
+            } else if (requestId != null && requestExpiresAt <= now()) {
+                throw new ArmRequestRejected(requestId, denied);
             }
             throw denied;
         }
+        // The opaque server deadline expires before closed receipts can be evicted.
+        // An absent expired request is terminal even if the runtime is unavailable.
+        if (previous == null && requestId != null && requestExpiresAt <= now())
+            throw new ArmRequestRejected(requestId, new IllegalStateException("Arm request expired; start a new Arm request"));
         if (!enabled) throw new IllegalStateException("Debugger is disabled or incompatible");
         if (debuggerConflict) throw new IllegalStateException("Another Rhino debugger owns a context; disable the conflicting debugger and restart the plugin");
         if (previous != null) {
@@ -158,10 +164,6 @@ public final class DebugRuntime implements Debugger {
                 throw new IllegalStateException("Arm request ID was reused with different options");
             return snapshot(previous);
         }
-        // The opaque server deadline expires before closed receipts can be evicted.
-        // A late retry therefore cannot silently create a replacement for a removed session.
-        if (requestId != null && requestExpiresAt <= now())
-            throw new ArmRequestRejected(requestId, new IllegalStateException("Arm request expired; start a new Arm request"));
         if (requestId != null && requestExpiresAt > now() + ARM_REQUEST_WINDOW_MILLIS)
             throw new IllegalStateException("Arm request deadline is invalid; refresh capabilities");
         if (sessions.values().stream().filter(s -> !s.closed).count() >= MAX_SESSIONS) throw new IllegalStateException("Debug session limit reached");

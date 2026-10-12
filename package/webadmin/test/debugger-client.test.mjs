@@ -307,6 +307,7 @@ test('lost arm response retains one creation request and recovers the original p
     const created = new Map();
     let loseResponse = true;
     const { client, calls, capabilityCalls, scheduled } = fixture({ post: (path, body) => {
+        if (path.endsWith('/heartbeat')) return {};
         assert.equal(path, '/sessions');
         if (!created.has(body.requestId)) created.set(body.requestId, session({ id: `session-${created.size + 1}` }));
         if (loseResponse) { loseResponse = false; throw new Error('connection reset after creation'); }
@@ -328,11 +329,82 @@ test('lost arm response retains one creation request and recovers the original p
     assert.equal(client.state.pendingArm, null);
     assert.equal(capabilityCalls.length, 1, 'retries must not extend the creation deadline');
     assert.equal(created.size, 1);
-    assert.deepEqual(calls.filter(c => c[0] === 'post').map(c => c[2]), [original, original]);
+    assert.deepEqual(calls.filter(c => c[1] === '/sessions').map(c => c[2]), [original, original]);
     await client.disarm();
     assert.deepEqual(calls.at(-1), ['del', '/sessions/session-1', { tabId: client.tabId }]);
     assert.equal(client.state.session, null);
     client.dispose();
+});
+
+test('recovering after the arm timeout renews the original lease before the next timer', async () => {
+    let now = 0, deadline = 15000, attempt = 0;
+    const { client, calls, scheduled } = fixture({ post: path => {
+        if (path.endsWith('/heartbeat')) {
+            assert(now < deadline, 'the recovered lease must still be live at renewal');
+            deadline = now + 15000;
+            return session({ status: 'armed' });
+        }
+        if (++attempt === 1) { now = 12000; throw new Error('No response after 12 seconds'); }
+        return session({ status: 'armed' }); // Recovery does not extend the server lease.
+    } });
+    await client.arm({ channelId: 'channel-1', leaseMillis: 15000 });
+    assert.equal(scheduled.size, 0);
+    now = 12100;
+    await client.arm(null, true);
+    assert.equal(deadline, 27100, 'renew before waiting another three seconds');
+    assert.deepEqual(calls.at(-1), ['post', '/sessions/s-1/heartbeat', { tabId: client.tabId }]);
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.lost, false);
+    assert.equal(scheduled.size, 2, 'resume normal polling and heartbeat cadence');
+    client.dispose();
+});
+
+test('failed recovery renewal keeps the known session and stops polling', async () => {
+    let attempt = 0;
+    const { client, calls, scheduled } = fixture({ post: path => {
+        if (path.endsWith('/heartbeat')) throw new Error('Renewal denied');
+        if (++attempt === 1) throw new Error('Arm response lost');
+        return session();
+    } });
+    await client.arm({ channelId: 'channel-1' });
+    await client.arm(null, true);
+    assert.equal(client.state.session.id, 's-1');
+    assert.equal(client.state.pendingArm, null, 'creation is known even if renewal fails');
+    assert.equal(client.state.lost, true);
+    assert.equal(client.state.busy, false);
+    assert.match(client.state.error, /Renewal denied/);
+    assert.equal(scheduled.size, 0);
+    client.dispose();
+    assert.deepEqual(calls.at(-1), ['del', '/sessions/s-1', { tabId: client.tabId }]);
+});
+
+test('in-flight recovery renewal cannot restart timers after ownership or session changes', async () => {
+    for (const change of ['dispose', 'owner', 'closed']) {
+        for (const fail of [false, true]) {
+            const renewal = deferred();
+            let attempt = 0;
+            const { client, scheduled, owner } = fixture({
+                get: () => session({ status: 'closed' }),
+                post: path => {
+                    if (path.endsWith('/heartbeat')) return renewal.promise;
+                    if (++attempt === 1) throw new Error('Arm response lost');
+                    return session();
+                },
+            });
+            await client.arm({ channelId: 'channel-1' });
+            await client.arm(null, true);
+            if (change === 'dispose') client.dispose();
+            else if (change === 'owner') owner('engine-b/user-a');
+            else await client.poll();
+            const state = client.state, timerCount = scheduled.size;
+            if (fail) renewal.reject(new Error('Stale renewal failure'));
+            else renewal.resolve(session());
+            await Promise.resolve(); await Promise.resolve();
+            assert.equal(client.state, state, 'stale completion must not alter the new state');
+            assert.equal(scheduled.size, timerCount, 'stale completion must not schedule renewal');
+            client.dispose();
+        }
+    }
 });
 
 test('recovering a closed arm result never renews or recreates the expired session', async () => {
@@ -381,7 +453,8 @@ test('a recovery HTTP rejection without matching proof cannot discard a possibly
     for (const status of [400, 401, 403, 404, 409, 429]) {
         for (const body of [undefined, '<html>proxy error</html>', JSON.stringify({ code: 'arm_request_rejected', requestId: 'another-request' })]) {
             let attempt = 0;
-            const { client, calls, capabilityCalls } = fixture({ post: () => {
+            const { client, calls, capabilityCalls } = fixture({ post: path => {
+                if (path.endsWith('/heartbeat')) return {};
                 if (++attempt === 1) throw new Error('response lost');
                 if (attempt === 2) throw Object.assign(new Error('request rejected before recovery'), { status, body });
                 return session();
@@ -395,7 +468,7 @@ test('a recovery HTTP rejection without matching proof cannot discard a possibly
             assert.equal(client.state.session.id, 's-1');
             assert.equal(client.state.pendingArm, null);
             assert.equal(capabilityCalls.length, 1);
-            assert(calls.filter(c => c[0] === 'post').every(c => c[2] === original));
+            assert(calls.filter(c => c[1] === '/sessions').every(c => c[2] === original));
             client.dispose();
         }
     }

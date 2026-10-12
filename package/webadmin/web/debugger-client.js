@@ -127,7 +127,7 @@ export class DebuggerClient {
                 return;
             }
             this.emit({ session, armOptions, pendingArm: null });
-            if (session.status !== 'closed') this.startTimers();
+            if (session.status !== 'closed') this.startTimers(retry);
         } catch (e) {
             if (this.valid(epoch)) {
                 let resolved = false;
@@ -142,10 +142,12 @@ export class DebuggerClient {
         }
         finally { if (this.valid(epoch)) this.emit({ busy: false }); }
     }
-    startTimers() {
+    startTimers(recovered = false) {
         this.clearTimers();
         this.pollTimer = this.timers.setTimeout(() => this.poll(), 500);
-        this.leaseTimer = this.timers.setTimeout(() => this.heartbeat(), 3000);
+        // Recovery keeps the original deadline, which may be nearly expired.
+        if (recovered) this.heartbeat();
+        else this.leaseTimer = this.timers.setTimeout(() => this.heartbeat(), 3000);
     }
     clearTimers() {
         this.timers.clearTimeout(this.pollTimer);

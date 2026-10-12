@@ -570,6 +570,9 @@ class DebugRuntimeTest {
         assertNotEquals(id, runtime.create(OWNER, CHANNEL, otherTab).get("id"));
         Map<String,Object> changed = new HashMap<>(options); changed.put("breakOnEntry", false);
         assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, CHANNEL, changed));
+        changed.put("requestExpiresAt", Long.MIN_VALUE);
+        assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, CHANNEL, changed),
+                "An expired mutated request cannot prove that the original live lease is gone");
         assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, "other-channel", options));
         assertEquals(3L, runtime.status().get("activeSessions"));
     }
@@ -605,16 +608,41 @@ class DebugRuntimeTest {
         long expiry = TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 2_000;
         options.put("requestExpiresAt", expiry); options.put("leaseMillis", 60_000);
         String id = runtime.create(OWNER, CHANNEL, options).get("id").toString();
+        long leaseDeadline = sessionTime(id, "leaseDeadline");
         Thread.sleep(Math.max(1, expiry - TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 1));
         assertEquals(id, runtime.create(OWNER, CHANNEL, options).get("id"));
+        assertEquals(leaseDeadline, sessionTime(id, "leaseDeadline"));
         runtime.close(OWNER, id, TAB);
         assertEquals("closed", runtime.create(OWNER, CHANNEL, options).get("status"));
         setSessionTime(id, "closedAt", TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) - 60_001);
+        SecurityException denied = new SecurityException("Permission revoked");
+        DebugRuntime.ArmRequestRejected deniedRecovery = assertThrows(DebugRuntime.ArmRequestRejected.class,
+                () -> runtime.create(OWNER, CHANNEL, options, () -> { throw denied; }, () -> fail("No fresh source check after expiry")));
+        assertEquals(options.get("requestId"), deniedRecovery.requestId()); assertSame(denied, deniedRecovery.getCause());
         DebugRuntime.ArmRequestRejected rejected = assertThrows(DebugRuntime.ArmRequestRejected.class,
                 () -> runtime.create(OWNER, CHANNEL, options));
         assertEquals(options.get("requestId"), rejected.requestId());
         assertInstanceOf(IllegalStateException.class, rejected.getCause());
         assertThrows(SecurityException.class, () -> runtime.session(OWNER, id, TAB));
+        assertEquals(0L, runtime.status().get("activeSessions"));
+    }
+
+    @Test void expiredAbsentArmReturnsProofDespiteAuthorizationOrRuntimeFailure() {
+        Map<String,Object> options = armRequest(); options.put("requestExpiresAt", Long.MIN_VALUE);
+        AtomicInteger authorizations = new AtomicInteger();
+        SecurityException denied = new SecurityException("Permission revoked");
+        DebugRuntime.ArmRequestRejected rejected = assertThrows(DebugRuntime.ArmRequestRejected.class,
+                () -> runtime.create(OWNER, CHANNEL, options, () -> { authorizations.incrementAndGet(); throw denied; },
+                        () -> fail("No fresh source check after expiry")));
+        assertEquals(1, authorizations.get()); assertEquals(options.get("requestId"), rejected.requestId());
+        assertSame(denied, rejected.getCause()); assertEquals(0L, runtime.status().get("activeSessions"));
+        Debugger foreign = mock(Debugger.class);
+        ContextFactory existing = new ContextFactory() { @Override protected Context makeContext() { Context cx = super.makeContext(); cx.setDebugger(foreign, null); return cx; } };
+        runtime.attach(existing); existing.call(cx -> null);
+        assertEquals(true, runtime.status().get("debuggerConflict"));
+        assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create(OWNER, CHANNEL, options));
+        runtime.configure(false, false);
+        assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create(OWNER, CHANNEL, options));
         assertEquals(0L, runtime.status().get("activeSessions"));
     }
 

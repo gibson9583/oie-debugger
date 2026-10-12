@@ -204,15 +204,55 @@ class DebuggerServletTest {
         assertArmed(recoveredId); // The client must retain an uncertain Arm after this pre-invocation failure.
     }
 
-    @Test void armRejectionProofRequiresTheOriginalUnchangedRequest() throws Exception {
+    @ParameterizedTest @ValueSource(longs = {Long.MIN_VALUE, Long.MAX_VALUE})
+    void armRejectionProofRequiresTheOriginalUnchangedRequest(long changedDeadline) throws Exception {
         try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
             plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
             Map<String,Object> options = armRequest();
             String recoveredId = body(servlet("debuggerCreate").create(Json.write(options))).get("id").toString();
-            options.put("requestExpiresAt", Long.MAX_VALUE);
+            options.put("requestExpiresAt", changedDeadline);
             denyOperations("debuggerCreate");
             forbiddenWithoutArmProof(() -> servlet("debuggerCreate").create(Json.write(options)));
             assertClosed(recoveredId);
+        }
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"debuggerCreate", "debuggerSession", "debuggerCommand", "debuggerEvaluate", "deleted-channel", "unavailable"})
+    void expiredAbsentArmReturnsProofAfterPrerequisiteFailure(String failure) throws Exception {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest(); options.put("requestExpiresAt", Long.MIN_VALUE); options.put("evaluationEnabled", true);
+            int status = 403;
+            if (failure.equals("deleted-channel")) {
+                when(controllers.createChannelController().getChannelById("channel-a")).thenReturn(null); status = 400;
+            } else if (failure.equals("unavailable")) {
+                plugin.when(DebuggerPlugin::unavailableReason).thenReturn("Debugger unavailable"); status = 409;
+            } else denyOperations(failure);
+            rejectedArm(servlet("debuggerCreate").create(Json.write(options)), status, options.get("requestId"));
+            verify(authorization, atLeastOnce()).isUserAuthorized(eq(7), any(), anyMap(), any(), eq(true));
+            assertArmed(id); assertEquals(1L, runtime.status().get("activeSessions"));
+        }
+    }
+
+    @ParameterizedTest @ValueSource(booleans = {false, true})
+    void expiredEvictedArmReturnsProofAfterRevocationOrChannelDeletion(boolean deletedChannel) throws Exception {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest();
+            long expiry = TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 1_000;
+            options.put("requestExpiresAt", expiry);
+            String recoveredId = body(servlet("debuggerCreate").create(Json.write(options))).get("id").toString();
+            runtime.close(OWNER, recoveredId, TAB);
+            Thread.sleep(Math.max(1, expiry - TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 1));
+            var sessions = DebugRuntime.class.getDeclaredField("sessions"); sessions.setAccessible(true);
+            Object retained = ((Map<?,?>) sessions.get(runtime)).get(recoveredId);
+            var closedAt = retained.getClass().getDeclaredField("closedAt"); closedAt.setAccessible(true);
+            synchronized (retained) { closedAt.setLong(retained, TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) - 60_001); }
+            if (deletedChannel) when(controllers.createChannelController().getChannelById("channel-a")).thenReturn(null);
+            else denyOperations("debuggerCommand");
+            rejectedArm(servlet("debuggerCreate").create(Json.write(options)), deletedChannel ? 400 : 403, options.get("requestId"));
+            assertThrows(SecurityException.class, () -> runtime.session(OWNER, recoveredId, TAB));
+            assertArmed(id); assertEquals(1L, runtime.status().get("activeSessions"));
         }
     }
 
