@@ -45,6 +45,8 @@ Breakpoints and exceptions can interrupt stepping. **Break on entry** can pause 
 
 Stay on the Debugger screen while debugging; leaving it ends the session. A session debugs one execution at a time, so concurrent messages may run without pausing. The displayed source is read-only and comes from the deployed channel.
 
+If the Arm response is interrupted, choose **Check arm result** to recover the original session. Its settings stay locked until the outcome is known. If that session has ended, choose **Clear session** before arming again.
+
 Selecting an existing **Message ID** does not send or reprocess that message. Choose **Arm for a new message** to remove that filter before sending a new message.
 
 ## Access and settings

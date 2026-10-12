@@ -87,6 +87,21 @@ class DebuggerServletTest {
         try { assertEquals(403, action.get().getStatus()); }
         catch (WebApplicationException denied) { assertEquals(403, denied.getResponse().getStatus()); }
     }
+    private static Map<String,Object> rejectedArm(Response response, int status, Object requestId) {
+        assertEquals(status, response.getStatus());
+        Map<String,Object> result = Json.read((String) response.getEntity());
+        assertEquals("arm_request_rejected", result.get("code")); assertEquals(requestId, result.get("requestId"));
+        return result;
+    }
+    private static void forbiddenWithoutArmProof(Supplier<Response> action) {
+        try {
+            Response response = action.get(); assertEquals(403, response.getStatus());
+            assertFalse(Json.read((String) response.getEntity()).containsKey("code"));
+        } catch (WebApplicationException denied) {
+            assertEquals(403, denied.getResponse().getStatus());
+            assertFalse(String.valueOf(denied.getResponse().getEntity()).contains("arm_request_rejected"));
+        }
+    }
     private void assertClosed(String sessionId) { assertEquals("closed", runtime.session(OWNER, sessionId, TAB).get("status")); }
     private void assertArmed(String sessionId) { assertEquals("armed", runtime.session(OWNER, sessionId, TAB).get("status")); }
     private Response sessionAction(String operation, String sessionId) {
@@ -122,6 +137,131 @@ class DebuggerServletTest {
             plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
             Response response = servlet("debuggerCreate").create("{\"channelId\":\"channel-a\",\"tabId\":\"new-tab\",\"evaluationEnabled\":true}");
             assertEquals("armed", body(response).get("status"));
+        }
+    }
+
+    private Map<String,Object> armRequest() {
+        return new java.util.LinkedHashMap<>(Map.of("channelId", "channel-a", "tabId", TAB,
+                "requestId", UUID.randomUUID().toString(), "requestExpiresAt", runtime.status().get("armRequestExpiresAt")));
+    }
+
+    @Test void armRecoveryReturnsSameSessionAndRejectsChangedRequest() {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest();
+            DebuggerServlet api = servlet("debuggerCreate");
+            String recoveredId = body(api.create(Json.write(options))).get("id").toString();
+            assertEquals(recoveredId, body(api.create(Json.write(options))).get("id"));
+            options.put("breakOnEntry", false);
+            Response changed = api.create(Json.write(options)); assertEquals(409, changed.getStatus());
+            assertFalse(Json.read((String) changed.getEntity()).containsKey("code"));
+            options.remove("breakOnEntry");
+            runtime.close(OWNER, recoveredId, TAB);
+            assertEquals("closed", body(api.create(Json.write(options))).get("status"));
+        }
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"debuggerCreate", "debuggerSession", "debuggerCommand", "debuggerEvaluate"})
+    void armRecoveryRevocationClosesOnlyTheMatchingOwnedLease(String operation) throws Exception {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest(); options.put("evaluationEnabled", true);
+            DebuggerServlet api = servlet("debuggerCreate");
+            String recoveredId = body(api.create(Json.write(options))).get("id").toString();
+            denyOperations(operation);
+            rejectedArm(api.create(Json.write(options)), 403, options.get("requestId"));
+            assertClosed(recoveredId); assertArmed(id);
+            Map<String,Object> fresh = armRequest(); fresh.put("evaluationEnabled", true);
+            forbiddenWithoutArmProof(() -> api.create(Json.write(fresh)));
+            assertEquals(1L, runtime.status().get("activeSessions"));
+        }
+    }
+
+    @Test void armRecoveryDeniedForeignOwnerOrTabCannotCloseOriginalLease() throws Exception {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest();
+            String recoveredId = body(servlet("debuggerCreate").create(Json.write(options))).get("id").toString();
+            denyOperations("debuggerCreate");
+            when(request.getSession().getId()).thenReturn("foreign-browser");
+            forbiddenWithoutArmProof(() -> servlet("debuggerCreate").create(Json.write(options)));
+            assertArmed(recoveredId);
+            when(request.getSession().getId()).thenReturn("browser-session");
+            options.put("tabId", "foreign-tab");
+            forbiddenWithoutArmProof(() -> servlet("debuggerCreate").create(Json.write(options)));
+            assertArmed(recoveredId);
+        }
+    }
+
+    @Test void expiredLoginRejectsRecoveryBeforeItsOwnedLeaseCanBeClosed() {
+        Map<String,Object> options = armRequest();
+        String recoveredId = createSession("channel-a", options);
+        when(request.getSession().getAttribute("authorized")).thenReturn(false);
+        WebApplicationException denied = assertThrows(WebApplicationException.class,
+                () -> servlet("debuggerCreate").create(Json.write(options)));
+        assertEquals(401, denied.getResponse().getStatus());
+        assertFalse(String.valueOf(denied.getResponse().getEntity()).contains("arm_request_rejected"));
+        assertArmed(recoveredId); // The client must retain an uncertain Arm after this pre-invocation failure.
+    }
+
+    @Test void armRejectionProofRequiresTheOriginalUnchangedRequest() throws Exception {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest();
+            String recoveredId = body(servlet("debuggerCreate").create(Json.write(options))).get("id").toString();
+            options.put("requestExpiresAt", Long.MAX_VALUE);
+            denyOperations("debuggerCreate");
+            forbiddenWithoutArmProof(() -> servlet("debuggerCreate").create(Json.write(options)));
+            assertClosed(recoveredId);
+        }
+    }
+
+    @Test void armRecoveryRechecksChannelAndLifecycleRestrictions() throws Exception {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest(); options.put("includeLifecycle", true);
+            String recoveredId = body(servlet("debuggerCreate").create(Json.write(options))).get("id").toString();
+            nativeChannelRestriction(true);
+            String lifecycleBody = Json.write(options);
+            forbidden(() -> servlet("debuggerCreate").create(lifecycleBody)); assertClosed(recoveredId);
+            options = armRequest();
+            String channelSession = body(servlet("debuggerCreate").create(Json.write(options))).get("id").toString();
+            nativeChannelRestriction(false);
+            String channelBody = Json.write(options);
+            forbidden(() -> servlet("debuggerCreate").create(channelBody)); assertClosed(channelSession);
+        }
+    }
+
+    @Test void armReceiptSurvivesSourceInvalidationButFreshCreateStillValidatesSource() throws Exception {
+        try (PausedScript paused = new PausedScript(false);
+                MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest(); options.put("sourceId", paused.sourceId);
+            String recoveredId = body(servlet("debuggerCreate").create(Json.write(options))).get("id").toString();
+            CompiledScriptCache.getInstance().removeCompiledScript(paused.sourceName);
+            runtime.invalidate("channel-a", "Source replaced");
+            Map<String,Object> recovered = body(servlet("debuggerCreate").create(Json.write(options)));
+            assertEquals(recoveredId, recovered.get("id")); assertEquals("closed", recovered.get("status"));
+            options.put("requestId", UUID.randomUUID().toString());
+            assertNotEquals(200, servlet("debuggerCreate").create(Json.write(options)).getStatus());
+            assertEquals(0L, runtime.status().get("activeSessions"));
+        }
+    }
+
+    @Test void armRejectsMalformedOrExpiredRecoveryFieldsWithoutCreating() {
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            Map<String,Object> options = armRequest(); options.put("requestId", 42);
+            Response malformed = servlet("debuggerCreate").create(Json.write(options)); assertEquals(400, malformed.getStatus());
+            assertFalse(Json.read((String) malformed.getEntity()).containsKey("code"));
+            options.put("requestId", "request"); options.remove("requestExpiresAt");
+            assertEquals(400, servlet("debuggerCreate").create(Json.write(options)).getStatus());
+            options.put("requestExpiresAt", 0);
+            rejectedArm(servlet("debuggerCreate").create(Json.write(options)), 409, "request");
+            options.put("requestExpiresAt", Long.MAX_VALUE);
+            Response future = servlet("debuggerCreate").create(Json.write(options)); assertEquals(409, future.getStatus());
+            assertFalse(Json.read((String) future.getEntity()).containsKey("code"));
+            assertEquals(1L, runtime.status().get("activeSessions"));
         }
     }
 
@@ -258,7 +398,7 @@ class DebuggerServletTest {
     @Test void ownedSessionMethodsReachTheirOwnRevocationCleanupBeforeEngineAuthorizationShortCircuit() throws Exception {
         // The engine inspects the concrete matching server method for this annotation.
         for (var method : DebuggerServletInterface.class.getDeclaredMethods()) {
-            if (Set.of("session", "heartbeat", "close", "breakpoints", "command").contains(method.getName()))
+            if (Set.of("create", "session", "heartbeat", "close", "breakpoints", "command").contains(method.getName()))
                 assertNotNull(DebuggerServlet.class.getMethod(method.getName(), method.getParameterTypes()).getAnnotation(DontCheckAuthorized.class), method.getName());
         }
     }

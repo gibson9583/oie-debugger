@@ -534,6 +534,124 @@ class DebugRuntimeTest {
         assertThrows(IllegalStateException.class, () -> create(Map.of()));
     }
 
+    @Test void concurrentArmRetriesCreateOnlyOneSessionAndDoNotRenewItsLease() throws Exception {
+        Map<String,Object> options = armRequest();
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Map<String,Object>>> results = new ArrayList<>();
+        for (int i = 0; i < 12; i++) results.add(workers.submit(() -> { start.await(); return runtime.create(OWNER, CHANNEL, options); }));
+        start.countDown();
+        Set<Object> ids = new HashSet<>();
+        for (Future<Map<String,Object>> result : results) ids.add(result.get(2, TimeUnit.SECONDS).get("id"));
+        assertEquals(1, ids.size()); assertEquals(1L, runtime.status().get("activeSessions"));
+        String id = ids.iterator().next().toString();
+        long deadline = sessionTime(id, "leaseDeadline");
+        assertEquals(id, runtime.create(OWNER, CHANNEL, options).get("id"));
+        assertEquals(deadline, sessionTime(id, "leaseDeadline"), "Recovering Arm must not renew the original lease");
+    }
+
+    @Test void recoveredArmOwnsAndClosesTheOriginallyHiddenWorker() throws Exception {
+        Map<String,Object> options = armRequest();
+        String lostId = runtime.create(OWNER, CHANNEL, options).get("id").toString();
+        Future<Object> worker = run(compile("var value=41;\nvalue+1;", "transformer"), CHANNEL);
+        awaitPause(lostId, 1);
+        Map<String,Object> recovered = runtime.create(OWNER, CHANNEL, options);
+        assertEquals(lostId, recovered.get("id")); assertEquals("paused", recovered.get("status"));
+        runtime.close(OWNER, recovered.get("id").toString(), TAB);
+        assertEquals(42.0, worker.get(2, TimeUnit.SECONDS)); assertEquals(0L, runtime.status().get("activeSessions"));
+        assertEquals("closed", runtime.create(OWNER, CHANNEL, options).get("status"));
+        assertEquals(42.0, run(compile("var value=41;\nvalue+1;", "next-transformer"), CHANNEL).get(1, TimeUnit.SECONDS));
+    }
+
+    @Test void armIdsAreScopedToOwnerAndTabAndRejectChangedOptionsOrChannel() {
+        Map<String,Object> options = armRequest();
+        String id = runtime.create(OWNER, CHANNEL, options).get("id").toString();
+        assertNotEquals(id, runtime.create("other-owner", CHANNEL, options).get("id"));
+        Map<String,Object> otherTab = new HashMap<>(options); otherTab.put("tabId", "other-tab");
+        assertNotEquals(id, runtime.create(OWNER, CHANNEL, otherTab).get("id"));
+        Map<String,Object> changed = new HashMap<>(options); changed.put("breakOnEntry", false);
+        assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, CHANNEL, changed));
+        assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, "other-channel", options));
+        assertEquals(3L, runtime.status().get("activeSessions"));
+    }
+
+    @Test void armReceiptPreservesTheOriginalNestedOptionsAndWatches() {
+        Map<String,Object> options = armRequest();
+        List<String> watches = new ArrayList<>(List.of("1"));
+        List<String> nested = new ArrayList<>(List.of("original"));
+        options.put("evaluationEnabled", true); options.put("watches", watches);
+        options.put("extension", new HashMap<>(Map.of("nested", nested)));
+        String id = runtime.create(OWNER, CHANNEL, options).get("id").toString();
+        watches.add("2"); nested.add("changed");
+        assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, CHANNEL, options));
+        options.put("watches", List.of("1")); options.put("extension", Map.of("nested", List.of("original")));
+        runtime.command(OWNER, id, command(runtime.session(OWNER, id, TAB), "setWatches", Map.of("expressions", List.of("3"))));
+        assertEquals(id, runtime.create(OWNER, CHANNEL, options).get("id"));
+    }
+
+    @Test void armRecoveryWorksAtBothActiveAndRetentionLimits() {
+        Map<String,Object> options = armRequest();
+        String id = runtime.create(OWNER, CHANNEL, options).get("id").toString();
+        for (int i = 1; i < 32; i++) create(Map.of());
+        assertEquals(id, runtime.create(OWNER, CHANNEL, options).get("id"));
+        assertThrows(IllegalStateException.class, () -> create(Map.of()));
+        runtime.closeAll("test");
+        for (int i = 32; i < 128; i++) runtime.close(OWNER, create(Map.of()), TAB);
+        assertEquals("closed", runtime.create(OWNER, CHANNEL, options).get("status"));
+        assertThrows(IllegalStateException.class, () -> create(Map.of()));
+    }
+
+    @Test void expiredArmRecoversRetainedSessionButCannotRecreateAnEvictedReceipt() throws Exception {
+        Map<String,Object> options = armRequest();
+        long expiry = TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 2_000;
+        options.put("requestExpiresAt", expiry); options.put("leaseMillis", 60_000);
+        String id = runtime.create(OWNER, CHANNEL, options).get("id").toString();
+        Thread.sleep(Math.max(1, expiry - TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 1));
+        assertEquals(id, runtime.create(OWNER, CHANNEL, options).get("id"));
+        runtime.close(OWNER, id, TAB);
+        assertEquals("closed", runtime.create(OWNER, CHANNEL, options).get("status"));
+        setSessionTime(id, "closedAt", TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) - 60_001);
+        DebugRuntime.ArmRequestRejected rejected = assertThrows(DebugRuntime.ArmRequestRejected.class,
+                () -> runtime.create(OWNER, CHANNEL, options));
+        assertEquals(options.get("requestId"), rejected.requestId());
+        assertInstanceOf(IllegalStateException.class, rejected.getCause());
+        assertThrows(SecurityException.class, () -> runtime.session(OWNER, id, TAB));
+        assertEquals(0L, runtime.status().get("activeSessions"));
+    }
+
+    @Test void armRequestIdsAndDeadlinesAreStrictlyValidatedBeforeCreating() {
+        for (Object invalid : Arrays.asList(null, "", " ", 42, "x".repeat(129))) {
+            Map<String,Object> options = armRequest(); options.put("requestId", invalid);
+            assertThrows(IllegalArgumentException.class, () -> runtime.create(OWNER, CHANNEL, options));
+        }
+        for (Object invalid : Arrays.asList(null, "123", 1.5, true)) {
+            Map<String,Object> options = armRequest(); options.put("requestExpiresAt", invalid);
+            assertThrows(IllegalArgumentException.class, () -> runtime.create(OWNER, CHANNEL, options));
+        }
+        Map<String,Object> missing = armRequest(); missing.remove("requestExpiresAt");
+        assertThrows(IllegalArgumentException.class, () -> runtime.create(OWNER, CHANNEL, missing));
+        Map<String,Object> expired = armRequest(); expired.put("requestExpiresAt", Long.MIN_VALUE);
+        assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create(OWNER, CHANNEL, expired));
+        Map<String,Object> future = armRequest(); future.put("requestExpiresAt", Long.MAX_VALUE);
+        assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, CHANNEL, future));
+        assertEquals(0L, runtime.status().get("activeSessions"));
+        assertEquals("armed", runtime.session(OWNER, create(Map.of()), TAB).get("status"), "Legacy callers can still create without a request ID");
+    }
+
+    @Test void recoveryRechecksAuthorizationButSkipsFreshSourceValidation() {
+        Map<String,Object> options = armRequest();
+        AtomicInteger authorizations = new AtomicInteger(), sourceChecks = new AtomicInteger();
+        String id = runtime.create(OWNER, CHANNEL, options, authorizations::incrementAndGet, sourceChecks::incrementAndGet).get("id").toString();
+        assertEquals(id, runtime.create(OWNER, CHANNEL, options, authorizations::incrementAndGet, () -> { throw new IllegalStateException("source replaced"); }).get("id"));
+        assertEquals(2, authorizations.get()); assertEquals(1, sourceChecks.get());
+        assertThrows(SecurityException.class, () -> runtime.create("other-owner", CHANNEL, options, () -> { throw new SecurityException("denied"); }, () -> { }));
+        assertEquals("armed", runtime.session(OWNER, id, TAB).get("status"));
+        DebugRuntime.ArmRequestRejected rejected = assertThrows(DebugRuntime.ArmRequestRejected.class,
+                () -> runtime.create(OWNER, CHANNEL, options, () -> { throw new SecurityException("denied"); }, () -> { }));
+        assertEquals(options.get("requestId"), rejected.requestId());
+        assertInstanceOf(SecurityException.class, rejected.getCause());
+        assertEquals("closed", runtime.session(OWNER, id, TAB).get("status"));
+    }
+
     @Test void stopAndRestartDetachListenersAndRestartLeaseWatchdog() throws Exception {
         String id = create(Map.of()); Future<Object> result = run(compile("var n=1;\nn;", "transformer"), CHANNEL);
         awaitPause(id, 1); runtime.configure(false, false); assertEquals(1.0, result.get(2, TimeUnit.SECONDS));
@@ -623,6 +741,22 @@ class DebugRuntimeTest {
     private String create(Map<String, Object> overrides) {
         Map<String, Object> options = new HashMap<>(Map.of("tabId", TAB, "includeLifecycle", true)); options.putAll(overrides);
         return runtime.create(OWNER, CHANNEL, options).get("id").toString();
+    }
+    private Map<String,Object> armRequest() {
+        return new HashMap<>(Map.of("tabId", TAB, "includeLifecycle", true, "requestId", UUID.randomUUID().toString(),
+                "requestExpiresAt", runtime.status().get("armRequestExpiresAt")));
+    }
+    private Object storedSession(String id) throws Exception {
+        var field = DebugRuntime.class.getDeclaredField("sessions"); field.setAccessible(true);
+        return ((Map<?,?>) field.get(runtime)).get(id);
+    }
+    private long sessionTime(String id, String name) throws Exception {
+        Object session = storedSession(id); var field = session.getClass().getDeclaredField(name); field.setAccessible(true);
+        synchronized (session) { return field.getLong(session); }
+    }
+    private void setSessionTime(String id, String name, long value) throws Exception {
+        Object session = storedSession(id); var field = session.getClass().getDeclaredField(name); field.setAccessible(true);
+        synchronized (session) { field.setLong(session, value); }
     }
     @SuppressWarnings("unchecked") private static List<Map<String, Object>> frames(Map<String, Object> snapshot) { return (List<Map<String, Object>>) snapshot.get("frames"); }
     private Map<String, Object> awaitPause(String id, long generation) throws Exception {
