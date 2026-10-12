@@ -14,7 +14,7 @@ const calls=[],user={id:'user-1'},listeners=[];
 const fixture=window.fixture={calls,target:()=>target,setPaused:()=>{session.status='paused';},logout:()=>{user.id='user-2';listeners.forEach(fn=>fn());}};
 const source={id:'source-1',name:'transformer_2',kind:'transformer',hash:'hash',generation:1,text:'value;',lineCount:1,breakableLines:[1],authoredMappings:[]};
 const api={
- get:async(path)=>{if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion:1,controlAllowed:true,evaluationAllowed:true,globalAllowed:true});if(path.endsWith('/sources'))return JSON.stringify([source]);if(path.includes('/sources/'))return JSON.stringify(source);return JSON.stringify(session);},
+ get:async(path)=>{if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion:1,armRequestExpiresAt:30000,controlAllowed:true,evaluationAllowed:true,globalAllowed:true});if(path.endsWith('/sources'))return JSON.stringify([source]);if(path.includes('/sources/'))return JSON.stringify(source);return JSON.stringify(session);},
  post:async(path,text)=>{const body=JSON.parse(text);calls.push(['POST',path,body]);if(path.endsWith('/sessions')){if(mode==='arm-fails'&&serial)throw new Error('New session failed');session={id:'session-'+(++serial),channelId:body.channelId,status:'armed',pauseGeneration:0};return JSON.stringify(session);}return JSON.stringify({status:'completed'});},
  del:async(path)=>{calls.push(['DELETE',path]);if(mode==='delete-fails')throw new Error('Delete outcome unknown');if(mode==='deferred-delete')await new Promise(resolve=>fixture.releaseDelete=resolve);session=null;return '{}';},
  messages:{processNew:async(...args)=>{calls.push(['SEND',...args]);return 71;}},channels:{list:async()=>[{id:'channel-1',name:'Test channel'}]},onSessionExpired:()=>()=>{},onEngineUnknown:()=>()=>{}
@@ -72,8 +72,12 @@ try {
  const beforeSend=await page.evaluate(()=>({calls:fixture.calls,target:fixture.target()}));
  const arms=beforeSend.calls.filter(call=>call[0]==='POST'&&call[1].endsWith('/sessions'));
  assert.equal(arms.length,2);
- const {messageId,...original}=arms[0][2];
- assert.equal(messageId,'17');assert.deepEqual(arms[1][2],original);
+ const {messageId,requestId:originalRequestId,requestExpiresAt:originalDeadline,...original}=arms[0][2];
+ const {requestId:nextRequestId,requestExpiresAt:nextDeadline,...next}=arms[1][2];
+ assert.equal(messageId,'17');assert.deepEqual(next,original);
+ assert.equal(typeof originalRequestId,'string');assert.equal(typeof nextRequestId,'string');
+ assert.notEqual(nextRequestId,originalRequestId,'rearming for a new message must create a new request');
+ assert.equal(originalDeadline,30000);assert.equal(nextDeadline,30000);
  assert(beforeSend.calls.findIndex(call=>call[0]==='DELETE')<beforeSend.calls.indexOf(arms[1]));
  assert.equal(Object.hasOwn(beforeSend.target,'messageId'),false);
  assert.equal(beforeSend.target.connectorId,2);

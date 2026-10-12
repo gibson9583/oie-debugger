@@ -14,7 +14,7 @@ let target=mode==='view-only'?null:{channelId:'channel-1'},session=null,serial=0
 const calls=[],source={id:'source-1',name:'channel-1_transformer_0',kind:'transformer',hash:'hash',generation:1,text:'value;',lineCount:1,breakableLines:[1],authoredMappings:[]};
 window.fixture={calls,execution:()=>{session={...session,status:'running',messageId:'901',connectorId:7};},close:()=>{session={...session,status:'closed',closeReason:'maximum pause expired'};},evict:()=>{session=null;}};
 const api={
- get:async(path)=>{calls.push(['GET',path]);if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion:1,controlAllowed:mode!=='view-only',evaluationEnabled:mode!=='engine-disabled',evaluationAllowed:mode==='engine-disabled',globalAllowed:mode!=='view-only'});if(path.endsWith('/sources'))return JSON.stringify([source]);if(path.includes('/sources/'))return JSON.stringify(source);if(path.includes('/sessions/'))return JSON.stringify(session);throw new Error('Unexpected GET '+path);},
+ get:async(path)=>{calls.push(['GET',path]);if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion:1,armRequestExpiresAt:30000,controlAllowed:mode!=='view-only',evaluationEnabled:mode!=='engine-disabled',evaluationAllowed:mode==='engine-disabled',globalAllowed:mode!=='view-only'});if(path.endsWith('/sources'))return JSON.stringify([source]);if(path.includes('/sources/'))return JSON.stringify(source);if(path.includes('/sessions/'))return JSON.stringify(session);throw new Error('Unexpected GET '+path);},
  post:async(path,text)=>{const body=JSON.parse(text);calls.push(['POST',path,body]);if(path.endsWith('/sessions')){session={id:'session-'+(++serial),channelId:body.channelId,status:'armed',pauseGeneration:0,maxPauseMillis:body.maxPauseMillis,includeLifecycle:body.includeLifecycle,evaluationEnabled:body.evaluationEnabled};return JSON.stringify(session);}if(path.endsWith('/heartbeat'))return JSON.stringify(session);throw new Error('Unexpected POST '+path);},
  del:async(path)=>{calls.push(['DELETE',path]);if(!session)throw Object.assign(new Error('Debug session is unavailable to this owner/tab'),{status:403});session=null;return '{}';},
  channels:{list:async()=>[{id:'channel-1',name:'Options fixture'}]},onSessionExpired:()=>()=>{},onEngineUnknown:()=>()=>{}
@@ -122,8 +122,10 @@ try {
         assert.equal(await page.locator('.dbg-target').count(), 0, 'armed view must not show frozen options');
         const requests = await page.evaluate(() => fixture.calls.filter(call => call[0] === 'POST' && call[1].endsWith('/sessions')));
         assert.equal(requests.length, 1);
-        const { tabId, ...options } = requests[0][2];
+        const { tabId, requestId, requestExpiresAt, ...options } = requests[0][2];
         assert.equal(typeof tabId, 'string');
+        assert.equal(typeof requestId, 'string');
+        assert.equal(requestExpiresAt, 30000);
         assert.deepEqual(options, { channelId: 'channel-1', connectorId: 0, scriptKind: 'transformer', sourceId: 'source-1', breakOnEntry: false, pauseOnExceptions: true, pauseOnDebugger: true, includeLifecycle: true, includeGlobal: false, evaluationEnabled: false, watches: [], maxPauseMillis: 45000, leaseMillis: 15000 });
         const expected = { Channel: 'Options fixture', 'Message filter': 'Any message', 'Connector filter': 'Source (0)', 'Script kind': 'transformer', 'Deployed source': 'channel-1_transformer_0', 'Break on entry': 'Off', 'Pause on exceptions': 'On', 'Lifecycle / scripts without a message': 'On', Evaluation: 'Off', 'Maximum pause': '45 seconds' };
         assert.deepEqual(await summary(page), expected);

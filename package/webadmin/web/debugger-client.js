@@ -63,7 +63,7 @@ export class DebuggerClient {
         this.sourceEpoch = 0;
         this.listEpoch = 0;
         this.snapshotRevision = 0;
-        this.state = { capabilities: null, sources: [], source: null, session: null, armOptions: null, error: '', busy: false, lost: false, receipt: null, pending: null, breakpoints: {} };
+        this.state = { capabilities: null, sources: [], source: null, session: null, armOptions: null, pendingArm: null, error: '', busy: false, lost: false, receipt: null, pending: null, breakpoints: {} };
     }
     emit(patch) { this.state = { ...this.state, ...patch }; if (this.alive) this.changed(this.state); }
     valid(epoch = this.epoch) { return this.alive && epoch === this.epoch && this.owner !== null && this.owner === this.context(); }
@@ -96,31 +96,58 @@ export class DebuggerClient {
             if (this.valid(epoch) && request === this.sourceEpoch) this.emit({ source });
         } catch (e) { if (this.valid(epoch) && request === this.sourceEpoch) this.emit({ error: e.message }); }
     }
-    async arm(options) {
+    async arm(options, retry = false) {
         this.assert();
         if (this.state.busy || this.state.session) return;
+        if (!retry && this.state.pendingArm) throw new Error('Check the previous arm result before starting another session.');
+        if (retry && !this.state.pendingArm) return;
         // Keep the submitted target and flags separate from live execution identity.
-        const armOptions = { ...options };
+        const armOptions = { ...(retry ? this.state.pendingArm.options : options) };
         if (Array.isArray(armOptions.watches)) armOptions.watches = [...armOptions.watches];
+        let request = retry ? this.state.pendingArm.request : null;
         const epoch = ++this.epoch;
         this.emit({ busy: true, lost: false, error: '', receipt: null, pending: null, breakpoints: {}, armOptions: null });
         try {
-            const session = await this.api.post('/sessions', { ...armOptions, tabId: this.tabId });
-            if (!session?.id || !['armed', 'running', 'paused'].includes(session.status)) throw new Error('The debugger returned an incompatible session response.');
+            if (!request) {
+                // The server supplies a short, opaque creation deadline. Reuse it
+                // on every retry so an evicted request can never arm a new lease.
+                const capabilities = await this.api.get('/capabilities');
+                if (!this.valid(epoch)) return;
+                this.emit({ capabilities });
+                if (!capabilities?.available || capabilities.apiVersion !== 1 || capabilities.controlAllowed === false)
+                    throw new Error(capabilities?.reason || 'Debugger control is unavailable.');
+                if (!Number.isSafeInteger(capabilities.armRequestExpiresAt)) throw new Error('Reload the debugger after updating the engine plugin.');
+                request = { ...armOptions, tabId: this.tabId, requestId: this.newId(), requestExpiresAt: capabilities.armRequestExpiresAt };
+            }
+            const session = await this.api.post('/sessions', request);
+            if (!session?.id || !['armed', 'running', 'paused', 'closed'].includes(session.status)) throw new Error('The debugger returned an incompatible session response.');
             if (!this.valid(epoch)) {
                 // A navigation while POST was in flight must not orphan a lease.
-                if (this.owner === this.context()) await this.api.del(`/sessions/${enc(session.id)}`, { tabId: this.tabId }).catch(() => {});
+                if (session.status !== 'closed' && this.owner === this.context()) await this.api.del(`/sessions/${enc(session.id)}`, { tabId: this.tabId }).catch(() => {});
                 return;
             }
-            this.emit({ session, armOptions });
-            this.startTimers();
-        } catch (e) { if (this.valid(epoch)) this.emit({ error: e.message }); }
+            this.emit({ session, armOptions, pendingArm: null });
+            if (session.status !== 'closed') this.startTimers(retry);
+        } catch (e) {
+            if (this.valid(epoch)) {
+                let resolved = false;
+                try {
+                    const rejection = JSON.parse(e.body);
+                    resolved = rejection?.code === 'arm_request_rejected' && rejection.requestId === request?.requestId;
+                } catch { /* An HTTP status alone cannot resolve an earlier unknown creation. */ }
+                const uncertain = request && !resolved && (retry || !(e.status >= 400 && e.status < 500));
+                this.emit({ pendingArm: uncertain ? { options: armOptions, request } : null,
+                    error: uncertain ? `${e.message} The arm result is unknown. Check it before starting another session; an unrenewed lease expires automatically.` : e.message });
+            }
+        }
         finally { if (this.valid(epoch)) this.emit({ busy: false }); }
     }
-    startTimers() {
+    startTimers(recovered = false) {
         this.clearTimers();
         this.pollTimer = this.timers.setTimeout(() => this.poll(), 500);
-        this.leaseTimer = this.timers.setTimeout(() => this.heartbeat(), 3000);
+        // Recovery keeps the original deadline, which may be nearly expired.
+        if (recovered) this.heartbeat();
+        else this.leaseTimer = this.timers.setTimeout(() => this.heartbeat(), 3000);
     }
     clearTimers() {
         this.timers.clearTimeout(this.pollTimer);
@@ -255,7 +282,7 @@ export class DebuggerClient {
         this.alive = false;
         this.epoch++;
         const session = this.state.session;
-        this.state = { capabilities: null, sources: [], source: null, session: null, armOptions: null, error: '', busy: false, lost: true, receipt: null, pending: null, breakpoints: {} };
+        this.state = { capabilities: null, sources: [], source: null, session: null, armOptions: null, pendingArm: null, error: '', busy: false, lost: true, receipt: null, pending: null, breakpoints: {} };
         if (session && session.status !== 'closed' && this.owner === this.context()) {
             this.api.del(`/sessions/${enc(session.id)}`, { tabId: this.tabId }).catch(() => {});
         }

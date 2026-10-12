@@ -13,6 +13,7 @@ import java.util.function.Predicate;
 public final class DebugRuntime implements Debugger {
     private static final DebugRuntime INSTANCE = new DebugRuntime();
     private static final int MAX_SESSIONS = 32, MAX_PAUSES = 4, MAX_COMMANDS = 256;
+    private static final long ARM_REQUEST_WINDOW_MILLIS = 30_000;
     private final SourceRegistry registry = new SourceRegistry();
     private final ConcurrentMap<String, Session> sessions = new ConcurrentHashMap<>();
     private final Map<ContextFactory, ContextFactory.Listener> factories = Collections.synchronizedMap(new WeakHashMap<>());
@@ -26,6 +27,16 @@ public final class DebugRuntime implements Debugger {
     public static DebugRuntime getInstance() { return INSTANCE; }
 
     public DebugRuntime() { }
+
+    /** Proof that this Arm request has no live lease and cannot create one later. */
+    public static final class ArmRequestRejected extends RuntimeException {
+        private final String requestId;
+        ArmRequestRejected(String requestId, RuntimeException cause) {
+            super(cause.getMessage(), cause); this.requestId = requestId;
+        }
+        public String requestId() { return requestId; }
+        @Override public synchronized RuntimeException getCause() { return (RuntimeException) super.getCause(); }
+    }
 
     public void setAttachmentGuard(Predicate<ContextFactory> guard) { attachmentGuard = Objects.requireNonNull(guard); }
 
@@ -110,17 +121,58 @@ public final class DebugRuntime implements Debugger {
         return source != null && source.id.equals(sourceId);
     }
 
-    public synchronized Map<String, Object> create(String owner, String channelId, Map<String, Object> options) {
+    public Map<String, Object> create(String owner, String channelId, Map<String, Object> options) {
+        return create(owner, channelId, options, () -> { }, () -> { });
+    }
+
+    /** A repeated Arm request recovers the original session without renewing or reopening it. */
+    public synchronized Map<String, Object> create(String owner, String channelId, Map<String, Object> options,
+            Runnable authorize, Runnable validateFreshSource) {
+        requireText(owner, "owner", 512); requireText(channelId, "channelId", 128);
+        String tabId = requiredString(options, "tabId"); requireText(tabId, "tabId", 128);
+        String requestId = creationRequestId(options);
+        long requestExpiresAt = requestId == null ? 0 : creationDeadline(options);
+        expire();
+        Session previous = null;
+        if (requestId != null) {
+            for (Session candidate : sessions.values()) {
+                if (owner.equals(candidate.owner) && tabId.equals(candidate.tabId) && requestId.equals(candidate.requestId)) {
+                    previous = candidate;
+                    break;
+                }
+            }
+        }
+        try { authorize.run(); }
+        catch (RuntimeException denied) {
+            if (previous != null) {
+                synchronized (previous) { closeLocked(previous, "Arm authorization failed"); }
+                if (channelId.equals(previous.channel) && previous.creationOptions.equals(options))
+                    throw new ArmRequestRejected(requestId, denied);
+            } else if (requestId != null && requestExpiresAt <= now()) {
+                throw new ArmRequestRejected(requestId, denied);
+            }
+            throw denied;
+        }
+        // The opaque server deadline expires before closed receipts can be evicted.
+        // An absent expired request is terminal even if the runtime is unavailable.
+        if (previous == null && requestId != null && requestExpiresAt <= now())
+            throw new ArmRequestRejected(requestId, new IllegalStateException("Arm request expired; start a new Arm request"));
         if (!enabled) throw new IllegalStateException("Debugger is disabled or incompatible");
         if (debuggerConflict) throw new IllegalStateException("Another Rhino debugger owns a context; disable the conflicting debugger and restart the plugin");
-        requireText(owner, "owner", 512); requireText(channelId, "channelId", 128);
-        expire();
+        if (previous != null) {
+            if (!channelId.equals(previous.channel) || !previous.creationOptions.equals(options))
+                throw new IllegalStateException("Arm request ID was reused with different options");
+            return snapshot(previous);
+        }
+        if (requestId != null && requestExpiresAt > now() + ARM_REQUEST_WINDOW_MILLIS)
+            throw new IllegalStateException("Arm request deadline is invalid; refresh capabilities");
         if (sessions.values().stream().filter(s -> !s.closed).count() >= MAX_SESSIONS) throw new IllegalStateException("Debug session limit reached");
         if (sessions.size() >= 128) throw new IllegalStateException("Recent session retention limit reached; retry after one minute");
         Session session = new Session(owner, channelId, options);
         if (channelId.equals("global") && !bool(options, "includeGlobal", false)) throw new IllegalArgumentException("Global scripts require explicit includeGlobal opt-in");
         if (session.evaluationEnabled && !evaluationEnabled) throw new SecurityException("Evaluation is disabled by server policy");
         if (!session.watches.isEmpty() && !session.evaluationEnabled) throw new SecurityException("Watches require elevated evaluation permission");
+        validateFreshSource.run();
         if (session.sourceId != null) {
             SourceRegistry.Source source = registry.require(session.sourceId);
             synchronized (registry) {
@@ -259,6 +311,7 @@ public final class DebugRuntime implements Debugger {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("enabled", enabled); result.put("evaluationEnabled", evaluationEnabled);
         result.put("debuggerConflict", debuggerConflict);
+        result.put("armRequestExpiresAt", now() + ARM_REQUEST_WINDOW_MILLIS);
         result.put("maxSessions", MAX_SESSIONS); result.put("maxPaused", MAX_PAUSES); result.put("paused", pausedCount.get());
         result.put("attachedFactories", factories.size()); result.put("activeSessions", sessions.values().stream().filter(s -> !s.closed).count());
         result.put("evaluationBudget", "Best effort: 10000 Rhino callbacks or 1000ms checked at callbacks; tight JavaScript loops without callbacks and Java/native calls cannot be forcibly cancelled");
@@ -636,6 +689,8 @@ public final class DebugRuntime implements Debugger {
     private static final class Session {
         final long createdAtNanos = System.nanoTime();
         final String id = UUID.randomUUID().toString(), owner, tabId, channel, messageId, connectorId, sourceId, scriptKind;
+        final String requestId;
+        final Map<String, Object> creationOptions;
         final boolean evaluationEnabled, includeLifecycle, pauseOnExceptions, pauseOnDebugger, breakOnEntry;
         final long leaseMillis, maxPauseMillis;
         final Map<String, Map<Integer, Breakpoint>> breakpoints = new LinkedHashMap<>();
@@ -653,6 +708,8 @@ public final class DebugRuntime implements Debugger {
         Map<String, Object> inspection = Map.of();
         Session(String owner, String channel, Map<String, Object> options) {
             this.owner = owner; this.channel = channel; tabId = requiredString(options, "tabId"); requireText(tabId, "tabId", 128);
+            requestId = creationRequestId(options);
+            creationOptions = requestId == null ? Map.of() : immutableOptions(options);
             messageId = optionalString(options, "messageId"); connectorId = optionalString(options, "connectorId");
             sourceId = optionalString(options, "sourceId"); scriptKind = optionalString(options, "scriptKind");
             evaluationEnabled = bool(options, "evaluationEnabled", false);
@@ -663,6 +720,36 @@ public final class DebugRuntime implements Debugger {
             maxPauseMillis = Math.max(1_000, Math.min(120_000, number(options, "maxPauseMillis", 60_000)));
             leaseDeadline = now() + leaseMillis;
         }
+    }
+
+    private static String creationRequestId(Map<String, Object> options) {
+        if (!options.containsKey("requestId")) return null;
+        if (!(options.get("requestId") instanceof String value)) throw new IllegalArgumentException("requestId must be text");
+        requireText(value, "requestId", 128);
+        return value;
+    }
+
+    private static long creationDeadline(Map<String, Object> options) {
+        Object value = options.get("requestExpiresAt");
+        if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long))
+            throw new IllegalArgumentException("requestExpiresAt must be the integer deadline from capabilities");
+        return ((Number) value).longValue();
+    }
+
+    private static Map<String, Object> immutableOptions(Map<String, Object> options) {
+        Map<String, Object> copy = new LinkedHashMap<>();
+        options.forEach((key, value) -> copy.put(key, immutableOption(value)));
+        return Collections.unmodifiableMap(copy);
+    }
+
+    private static Object immutableOption(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<Object, Object> copy = new LinkedHashMap<>();
+            map.forEach((key, item) -> copy.put(key, immutableOption(item)));
+            return Collections.unmodifiableMap(copy);
+        }
+        if (value instanceof List<?> list) return Collections.unmodifiableList(list.stream().map(DebugRuntime::immutableOption).toList());
+        return value;
     }
 
     private static List<String> expressions(Object raw) {

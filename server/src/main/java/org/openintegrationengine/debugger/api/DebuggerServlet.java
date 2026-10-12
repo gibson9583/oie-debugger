@@ -100,13 +100,23 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
     }
     private Response json(Supplier<Object> action) {
         try { return Response.ok(Json.write(action.get()), "application/json").header("Cache-Control", "no-store").build(); }
+        catch (DebugRuntime.ArmRequestRejected e) {
+            RuntimeException cause = e.getCause();
+            int status = cause instanceof SecurityException ? 403 : cause instanceof IllegalArgumentException ? 400
+                    : cause instanceof IllegalStateException ? 409 : cause instanceof WebApplicationException web ? web.getResponse().getStatus() : 500;
+            return failure(status, Map.of("error", Objects.toString(e.getMessage(), "Debugger request failed"),
+                    "code", "arm_request_rejected", "requestId", e.requestId()));
+        }
         catch (SecurityException e) { return failure(403, e.getMessage()); }
         catch (IllegalArgumentException e) { return failure(400, e.getMessage()); }
         catch (IllegalStateException e) { return failure(409, e.getMessage()); }
         catch (WebApplicationException e) { throw e; }
     }
     private static Response failure(int status, String message) {
-        return Response.status(status).entity(Json.write(Map.of("error", Objects.toString(message, "Debugger request failed"))))
+        return failure(status, Map.of("error", Objects.toString(message, "Debugger request failed")));
+    }
+    private static Response failure(int status, Map<String,?> body) {
+        return Response.status(status).entity(Json.write(body))
             .type("application/json").header("Cache-Control", "no-store").build();
     }
     private static String text(Map<String,Object> body, String key) {
@@ -163,16 +173,21 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
         result.put("authoredMappings", AuthoredSourceMapper.map(channelId, id, (String)result.get("name"), (String)result.get("text"), runtime));
         return result;
     }); }
-    @Override public Response create(@Param(value="body", excludeFromAudit=true) String body) { return json(() -> {
+    @Override @DontCheckAuthorized public Response create(@Param(value="body", excludeFromAudit=true) String body) { return json(() -> {
         Map<String,Object> options = Json.read(body);
         String channelId = text(options, "channelId");
-        channel(channelId);
-        requireOperation("debuggerSession");
-        if (DebuggerPlugin.unavailableReason() != null) throw new IllegalStateException(DebuggerPlugin.unavailableReason());
-        if (Boolean.TRUE.equals(options.get("evaluationEnabled")) || options.get("watches") instanceof java.util.List<?> watches && !watches.isEmpty()) evaluation();
-        if (Boolean.TRUE.equals(options.get("includeLifecycle"))) requireGlobalAccess();
-        if (options.get("sourceId") instanceof String sourceId && !sourceId.isBlank()) requireCurrentSource(sourceId);
-        return runtime.create(owner(), channelId, options);
+        // Authorize inside the creation lookup so a denied recovery can release only
+        // this owner/tab's original lease, just like the owned-session endpoints.
+        return runtime.create(owner(), channelId, options, () -> {
+            channel(channelId);
+            requireOperation("debuggerSession");
+            requireOperation("debuggerCommand");
+            if (DebuggerPlugin.unavailableReason() != null) throw new IllegalStateException(DebuggerPlugin.unavailableReason());
+            if (Boolean.TRUE.equals(options.get("evaluationEnabled")) || options.get("watches") instanceof java.util.List<?> watches && !watches.isEmpty()) evaluation();
+            if (Boolean.TRUE.equals(options.get("includeLifecycle"))) requireGlobalAccess();
+        }, () -> {
+            if (options.get("sourceId") instanceof String sourceId && !sourceId.isBlank()) requireCurrentSource(sourceId);
+        });
     }); }
     @Override @DontCheckAuthorized public Response session(@Param("debugSessionId") String id, @Param(value="tabId", excludeFromAudit=true) String tabId) { return json(() -> authorizedSession(id, tabId)); }
     @Override @DontCheckAuthorized public Response heartbeat(@Param("debugSessionId") String id, @Param(value="body", excludeFromAudit=true) String body) { return json(() -> {

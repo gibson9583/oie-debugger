@@ -6,8 +6,12 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
 const session = (patch = {}) => ({ id: 's-1', status: 'paused', channelId: 'channel-1', pauseGeneration: 2, frames: [], ...patch });
 function fixture(overrides = {}) {
     let owner = 'engine-a/user-a', serial = 0;
-    const calls = [], scheduled = new Map();
+    const calls = [], capabilityCalls = [], scheduled = new Map();
     const transport = Object.fromEntries(['get', 'post', 'put', 'del'].map(method => [method, async (...args) => {
+        if (method === 'get' && args[0] === '/capabilities') {
+            capabilityCalls.push(args);
+            return overrides.capabilities ? overrides.capabilities(...args) : { available: true, apiVersion: 1, controlAllowed: true, armRequestExpiresAt: 30000 };
+        }
         calls.push([method, ...args]);
         if (method === 'post' && args[1]?.action === 'setBreakpoints' && overrides.breakpointCommand) return overrides.breakpointCommand(...args);
         if (overrides[method]) return overrides[method](...args);
@@ -17,7 +21,7 @@ function fixture(overrides = {}) {
         setTimeout: (fn, ms) => { const id = ++serial; scheduled.set(id, { fn, ms }); return id; },
         clearTimeout: id => scheduled.delete(id),
     } });
-    return { client, calls, scheduled, owner: value => { owner = value; } };
+    return { client, calls, capabilityCalls, scheduled, owner: value => { owner = value; } };
 }
 
 test('plain JSON transport preserves singleton objects and literal request payloads', async () => {
@@ -102,7 +106,8 @@ test('confirmed arm settings copy submitted options and survive live identity up
     const arming = client.arm(options);
     assert.equal(client.state.armOptions, null);
     options.messageId = 'changed'; options.breakOnEntry = true; options.watches.push('newWatch');
-    assert.deepEqual(calls[0][2], { ...expected, tabId: client.tabId });
+    await Promise.resolve(); // Fresh capability preflight completes before POST.
+    assert.deepEqual(calls[0][2], { ...expected, tabId: client.tabId, requestId: calls[0][2].requestId, requestExpiresAt: 30000 });
     pending.resolve(session({ status: 'armed' })); await arming;
     assert.deepEqual(client.state.armOptions, expected);
     assert(states.filter(next => next.session).every(next => next.armOptions === client.state.armOptions),
@@ -117,7 +122,7 @@ test('confirmed arm settings copy submitted options and survive live identity up
 });
 
 test('failed or incompatible arm responses do not confirm settings', async () => {
-    for (const response of [null, {}, session({ status: 'closed' }), new Error('request failed')]) {
+    for (const response of [null, {}, new Error('request failed')]) {
         const { client } = fixture({ post: () => {
             if (response instanceof Error) throw response;
             return response;
@@ -166,7 +171,7 @@ test('server closure retains historical settings and rearming replaces the messa
     nextArm.resolve(session({ id: 's-2', status: 'armed' })); await arming;
     assert.deepEqual(client.state.armOptions, replacement);
     assert.equal(Object.hasOwn(client.state.armOptions, 'messageId'), false);
-    assert.deepEqual(calls.filter(call => call[0] === 'post').map(call => call[2]),
+    assert.deepEqual(calls.filter(call => call[0] === 'post').map(call => { const { requestId, requestExpiresAt, ...body } = call[2]; return body; }),
         [{ ...original, tabId: client.tabId }, { ...replacement, tabId: client.tabId }]);
     client.dispose();
     assert.equal(client.state.armOptions, null);
@@ -263,6 +268,7 @@ test('late successful arming after unmount releases the created session without 
     const pending = deferred();
     const { client, calls, scheduled } = fixture({ post: () => pending.promise });
     const arm = client.arm({ channelId: 'channel-1' });
+    await Promise.resolve();
     client.dispose();
     pending.resolve(session()); await arm;
     assert.equal(client.state.session, null);
@@ -275,6 +281,7 @@ test('engine changes fence in-flight arming and never send cleanup to a differen
     const pending = deferred();
     const { client, calls, owner } = fixture({ post: () => pending.promise });
     const arm = client.arm({ channelId: 'channel-1' });
+    await Promise.resolve();
     owner('engine-b/user-a');
     pending.resolve(session()); await arm;
     assert.equal(client.state.armOptions, null);
@@ -294,6 +301,254 @@ test('double arm is suppressed and failed arm never starts lease renewal', async
     assert.equal(client.state.busy, false);
     assert.equal(scheduled.size, 0);
     client.dispose();
+});
+
+test('lost arm response retains one creation request and recovers the original paused session', async () => {
+    const created = new Map();
+    let loseResponse = true;
+    const { client, calls, capabilityCalls, scheduled } = fixture({ post: (path, body) => {
+        if (path.endsWith('/heartbeat')) return {};
+        assert.equal(path, '/sessions');
+        if (!created.has(body.requestId)) created.set(body.requestId, session({ id: `session-${created.size + 1}` }));
+        if (loseResponse) { loseResponse = false; throw new Error('connection reset after creation'); }
+        return created.get(body.requestId);
+    } });
+    const options = { channelId: 'channel-1', evaluationEnabled: true, watches: ['msg'] };
+    await client.arm(options);
+    options.channelId = 'channel-2'; options.watches.push('changed');
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.busy, false);
+    assert.match(client.state.error, /arm result is unknown/);
+    assert.equal(scheduled.size, 0, 'an unknown session cannot renew its lease');
+    const original = structuredClone(client.state.pendingArm.request);
+    await assert.rejects(client.arm(options), /previous arm result/);
+    await client.arm(null, true);
+    assert.equal(client.state.session.id, 'session-1');
+    assert.equal(client.state.session.status, 'paused');
+    assert.deepEqual(client.state.armOptions, { channelId: 'channel-1', evaluationEnabled: true, watches: ['msg'] });
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(capabilityCalls.length, 1, 'retries must not extend the creation deadline');
+    assert.equal(created.size, 1);
+    assert.deepEqual(calls.filter(c => c[1] === '/sessions').map(c => c[2]), [original, original]);
+    await client.disarm();
+    assert.deepEqual(calls.at(-1), ['del', '/sessions/session-1', { tabId: client.tabId }]);
+    assert.equal(client.state.session, null);
+    client.dispose();
+});
+
+test('recovering after the arm timeout renews the original lease before the next timer', async () => {
+    let now = 0, deadline = 15000, attempt = 0;
+    const { client, calls, scheduled } = fixture({ post: path => {
+        if (path.endsWith('/heartbeat')) {
+            assert(now < deadline, 'the recovered lease must still be live at renewal');
+            deadline = now + 15000;
+            return session({ status: 'armed' });
+        }
+        if (++attempt === 1) { now = 12000; throw new Error('No response after 12 seconds'); }
+        return session({ status: 'armed' }); // Recovery does not extend the server lease.
+    } });
+    await client.arm({ channelId: 'channel-1', leaseMillis: 15000 });
+    assert.equal(scheduled.size, 0);
+    now = 12100;
+    await client.arm(null, true);
+    assert.equal(deadline, 27100, 'renew before waiting another three seconds');
+    assert.deepEqual(calls.at(-1), ['post', '/sessions/s-1/heartbeat', { tabId: client.tabId }]);
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.lost, false);
+    assert.equal(scheduled.size, 2, 'resume normal polling and heartbeat cadence');
+    client.dispose();
+});
+
+test('failed recovery renewal keeps the known session and stops polling', async () => {
+    let attempt = 0;
+    const { client, calls, scheduled } = fixture({ post: path => {
+        if (path.endsWith('/heartbeat')) throw new Error('Renewal denied');
+        if (++attempt === 1) throw new Error('Arm response lost');
+        return session();
+    } });
+    await client.arm({ channelId: 'channel-1' });
+    await client.arm(null, true);
+    assert.equal(client.state.session.id, 's-1');
+    assert.equal(client.state.pendingArm, null, 'creation is known even if renewal fails');
+    assert.equal(client.state.lost, true);
+    assert.equal(client.state.busy, false);
+    assert.match(client.state.error, /Renewal denied/);
+    assert.equal(scheduled.size, 0);
+    client.dispose();
+    assert.deepEqual(calls.at(-1), ['del', '/sessions/s-1', { tabId: client.tabId }]);
+});
+
+test('in-flight recovery renewal cannot restart timers after ownership or session changes', async () => {
+    for (const change of ['dispose', 'owner', 'closed']) {
+        for (const fail of [false, true]) {
+            const renewal = deferred();
+            let attempt = 0;
+            const { client, scheduled, owner } = fixture({
+                get: () => session({ status: 'closed' }),
+                post: path => {
+                    if (path.endsWith('/heartbeat')) return renewal.promise;
+                    if (++attempt === 1) throw new Error('Arm response lost');
+                    return session();
+                },
+            });
+            await client.arm({ channelId: 'channel-1' });
+            await client.arm(null, true);
+            if (change === 'dispose') client.dispose();
+            else if (change === 'owner') owner('engine-b/user-a');
+            else await client.poll();
+            const state = client.state, timerCount = scheduled.size;
+            if (fail) renewal.reject(new Error('Stale renewal failure'));
+            else renewal.resolve(session());
+            await Promise.resolve(); await Promise.resolve();
+            assert.equal(client.state, state, 'stale completion must not alter the new state');
+            assert.equal(scheduled.size, timerCount, 'stale completion must not schedule renewal');
+            client.dispose();
+        }
+    }
+});
+
+test('recovering a closed arm result never renews or recreates the expired session', async () => {
+    let attempt = 0;
+    const { client, calls, scheduled } = fixture({ post: () => {
+        if (++attempt === 1) throw new Error('response lost');
+        return session({ status: 'closed', closeReason: 'Owner lease expired' });
+    } });
+    await client.arm({ channelId: 'channel-1' });
+    await client.arm(null, true);
+    assert.equal(client.state.session.status, 'closed');
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(scheduled.size, 0);
+    await client.disarm();
+    assert.equal(calls.filter(c => c[0] === 'del').length, 0);
+    assert.equal(client.state.session, null);
+    client.dispose();
+});
+
+test('expired absent arm requests terminate recovery and the next deliberate arm uses a new request', async () => {
+    let attempt = 0, deadline = 30000;
+    const { client, calls, capabilityCalls } = fixture({
+        capabilities: () => ({ available: true, apiVersion: 1, armRequestExpiresAt: deadline }),
+        post: (path, body) => {
+            if (++attempt === 1) throw new Error('response lost');
+            if (attempt === 2) throw Object.assign(new Error('Arm request expired'), { status: 409,
+                body: JSON.stringify({ code: 'arm_request_rejected', requestId: body.requestId }) });
+            return session({ status: 'armed' });
+        },
+    });
+    await client.arm({ channelId: 'channel-1' });
+    const first = client.state.pendingArm.request;
+    await client.arm(null, true);
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.session, null);
+    deadline = 90000;
+    await client.arm({ channelId: 'channel-1' });
+    assert.equal(capabilityCalls.length, 2);
+    const last = calls.filter(c => c[0] === 'post').at(-1)[2];
+    assert.notEqual(last.requestId, first.requestId);
+    assert.equal(last.requestExpiresAt, deadline);
+    client.dispose();
+});
+
+test('a recovery HTTP rejection without matching proof cannot discard a possibly live arm', async () => {
+    for (const status of [400, 401, 403, 404, 409, 429]) {
+        for (const body of [undefined, '<html>proxy error</html>', JSON.stringify({ code: 'arm_request_rejected', requestId: 'another-request' })]) {
+            let attempt = 0;
+            const { client, calls, capabilityCalls } = fixture({ post: path => {
+                if (path.endsWith('/heartbeat')) return {};
+                if (++attempt === 1) throw new Error('response lost');
+                if (attempt === 2) throw Object.assign(new Error('request rejected before recovery'), { status, body });
+                return session();
+            } });
+            await client.arm({ channelId: 'channel-1' });
+            const original = client.state.pendingArm.request;
+            await client.arm(null, true);
+            assert.equal(client.state.pendingArm.request, original);
+            await assert.rejects(client.arm({ channelId: 'channel-1' }), /previous arm result/);
+            await client.arm(null, true);
+            assert.equal(client.state.session.id, 's-1');
+            assert.equal(client.state.pendingArm, null);
+            assert.equal(capabilityCalls.length, 1);
+            assert(calls.filter(c => c[1] === '/sessions').every(c => c[2] === original));
+            client.dispose();
+        }
+    }
+});
+
+test('confirmed authorization rejection releases pending arm settings for a fresh request', async () => {
+    let attempt = 0;
+    const { client } = fixture({ post: (path, body) => {
+        if (++attempt === 1) throw new Error('response lost');
+        throw Object.assign(new Error('Evaluation permission was revoked'), { status: 403,
+            body: JSON.stringify({ code: 'arm_request_rejected', requestId: body.requestId }) });
+    } });
+    await client.arm({ channelId: 'channel-1', evaluationEnabled: true });
+    await client.arm(null, true);
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.busy, false);
+    assert.equal(client.state.error, 'Evaluation permission was revoked');
+    client.dispose();
+});
+
+test('failed or denied capability preflight cannot create an unknown lease', async () => {
+    for (const capabilities of [new Error('offline'), { available: false, apiVersion: 1 },
+            { available: true, apiVersion: 1, controlAllowed: false, armRequestExpiresAt: 30000 },
+            { available: true, apiVersion: 1 }]) {
+        const { client, calls } = fixture({ capabilities: () => {
+            if (capabilities instanceof Error) throw capabilities;
+            return capabilities;
+        } });
+        await client.arm({ channelId: 'channel-1' });
+        assert.equal(calls.length, 0);
+        assert.equal(client.state.pendingArm, null);
+        assert.equal(client.state.busy, false);
+        assert.notEqual(client.state.error, '');
+        client.dispose();
+    }
+});
+
+test('disposal or owner change during capability preflight prevents session creation', async () => {
+    for (const dispose of [false, true]) {
+        const pending = deferred();
+        const { client, calls, owner } = fixture({ capabilities: () => pending.promise });
+        const arm = client.arm({ channelId: 'channel-1' });
+        if (dispose) client.dispose(); else owner('engine-b/user-a');
+        pending.resolve({ available: true, apiVersion: 1, armRequestExpiresAt: 30000 });
+        await arm;
+        assert.equal(calls.length, 0);
+        assert.equal(client.state.pendingArm, null);
+        client.dispose();
+    }
+});
+
+test('arm recovery suppresses duplicate checks and cleans up late success after disposal', async () => {
+    let attempt = 0;
+    const pending = deferred();
+    const { client, calls, scheduled } = fixture({ post: () => {
+        if (++attempt === 1) throw new Error('response lost');
+        return pending.promise;
+    } });
+    await client.arm({ channelId: 'channel-1' });
+    const recovering = client.arm(null, true);
+    await client.arm(null, true);
+    assert.equal(attempt, 2);
+    client.dispose();
+    pending.resolve(session()); await recovering;
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.session, null);
+    assert.equal(scheduled.size, 0);
+    assert.deepEqual(calls.at(-1), ['del', '/sessions/s-1', { tabId: client.tabId }]);
+});
+
+test('changed owners cannot recover an ambiguous arm or send cleanup to another engine', async () => {
+    const { client, calls, owner } = fixture({ post: () => { throw new Error('response lost'); } });
+    await client.arm({ channelId: 'channel-1' });
+    const count = calls.length;
+    owner('engine-b/user-a');
+    await assert.rejects(client.arm(null, true), /engine or login changed/);
+    client.dispose();
+    assert.equal(calls.length, count);
+    assert.equal(client.state.pendingArm, null);
 });
 
 test('lease renewal and polling stop on unmount or a failed heartbeat', async () => {
