@@ -425,6 +425,91 @@ class DebugRuntimeTest {
         assertEquals("closed", runtime.session(OWNER, id, TAB).get("status"));
     }
 
+    @Test void channelReleaseFencesCreationDuringAuthorizationAndSourceValidation() throws Exception {
+        Script script = compile("var n=41;\nn+1;", "transformer");
+        assertEquals(42.0, run(script, CHANNEL).get(1, TimeUnit.SECONDS));
+        String sourceId = runtime.sources(CHANNEL).get(0).get("id").toString();
+        for (boolean duringAuthorization : List.of(true, false)) {
+            Map<String,Object> options = armRequest();
+            options.put("sourceId", sourceId);
+            CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+            Future<Map<String,Object>> creating = gatedCreate(options, CHANNEL, entered, release, duringAuthorization);
+            awaitLatch(entered);
+            long event = System.nanoTime();
+            runtime.releaseChannel(CHANNEL, "Channel stopping", event);
+            release.countDown();
+            Map<String,Object> closed = creating.get(2, TimeUnit.SECONDS);
+            assertEquals("closed", closed.get("status"));
+            assertEquals("Channel stopping", closed.get("closeReason"));
+            assertEquals(closed.get("id"), runtime.create(OWNER, CHANNEL, options).get("id"));
+            assertEquals("closed", runtime.create(OWNER, CHANNEL, options).get("status"), "Recovery cannot reopen a canceled Arm");
+            assertEquals(42.0, run(script, CHANNEL).get(1, TimeUnit.SECONDS), "Draining work must not pause");
+            assertEquals(0L, runtime.status().get("activeSessions"));
+        }
+    }
+
+    @Test void delayedReleaseUsesArmStartEvenWhenDeliveredAfterAuthorizationAndPublication() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        Future<Map<String,Object>> creating = gatedCreate(armRequest(), CHANNEL, entered, release, true);
+        awaitLatch(entered);
+        long event = System.nanoTime();
+        release.countDown();
+        String id = creating.get(2, TimeUnit.SECONDS).get("id").toString();
+        runtime.releaseChannel(CHANNEL, "Delayed stop event", event);
+        assertEquals("closed", runtime.session(OWNER, id, TAB).get("status"), "Delivery timing cannot change which Arm the event closes");
+    }
+
+    @Test void unrelatedAndOlderEventsDoNotCancelAnArmStillBeingValidated() throws Exception {
+        long olderEvent = System.nanoTime();
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        Future<Map<String,Object>> creating = gatedCreate(armRequest(), CHANNEL, entered, release, false);
+        awaitLatch(entered);
+        runtime.releaseChannel("another-channel", "Other channel stopping");
+        runtime.releaseChannel(CHANNEL, "Delayed old event", olderEvent);
+        release.countDown();
+        assertEquals("armed", creating.get(2, TimeUnit.SECONDS).get("status"));
+        assertEquals(1L, runtime.status().get("activeSessions"));
+    }
+
+    @Test void bulkCloseAndChannelRemovalFenceAnUnpublishedArm() throws Exception {
+        for (boolean removal : List.of(false, true)) {
+            Map<String,Object> options = armRequest();
+            CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+            Future<Map<String,Object>> creating = gatedCreate(options, CHANNEL, entered, release, false);
+            awaitLatch(entered);
+            if (removal) runtime.invalidate(CHANNEL, "Channel removed");
+            else runtime.closeAll("Resources reloading");
+            release.countDown();
+            assertEquals("closed", creating.get(2, TimeUnit.SECONDS).get("status"));
+            assertEquals("closed", runtime.create(OWNER, CHANNEL, options).get("status"));
+        }
+    }
+
+    @Test void failedCreationClearsItsReleaseFenceBeforeTheNextArm() {
+        assertThrows(IllegalStateException.class, () -> runtime.create(OWNER, CHANNEL, armRequest(), () -> {
+            runtime.closeAll("Policy changed during authorization");
+            throw new IllegalStateException("Authorization unavailable");
+        }, () -> fail("No source check after failed authorization")));
+        assertEquals("armed", runtime.create(OWNER, CHANNEL, armRequest()).get("status"));
+    }
+
+    @Test void disablingRuntimeDuringSourceValidationLeavesOnlyAClosedReceipt() {
+        Map<String,Object> options = armRequest();
+        Map<String,Object> closed = runtime.create(OWNER, CHANNEL, options, () -> { }, () -> runtime.configure(false, false));
+        assertEquals("closed", closed.get("status"));
+        assertEquals(0L, runtime.status().get("activeSessions"));
+        runtime.configure(true, true);
+        assertEquals(closed.get("id"), runtime.create(OWNER, CHANNEL, options).get("id"));
+        assertEquals("closed", runtime.create(OWNER, CHANNEL, options).get("status"));
+    }
+
+    private Future<Map<String,Object>> gatedCreate(Map<String,Object> options, String channel,
+            CountDownLatch entered, CountDownLatch release, boolean duringAuthorization) {
+        Runnable wait = () -> { entered.countDown(); awaitLatch(release); };
+        return workers.submit(() -> runtime.create(OWNER, channel, options,
+                duringAuthorization ? wait : () -> { }, duringAuthorization ? () -> { } : wait));
+    }
+
     @Test void releaseChannelClosesLifecycleSessionAndDoesNotRePauseDrainingWork() throws Exception {
         Script script = compile("var n=1;\ndebugger;\nn;", "transformer"); String id = create(Map.of());
         Future<Object> source = run(script, CHANNEL, message(CHANNEL, 21, 0)); awaitPause(id, 1);
@@ -679,6 +764,84 @@ class DebugRuntimeTest {
         assertInstanceOf(SecurityException.class, rejected.getCause());
         assertEquals("closed", runtime.session(OWNER, id, TAB).get("status"));
     }
+
+    @Test void expiredRetryCannotDisproveASlowOriginalStillValidatingItsSource() throws Exception {
+        Map<String, Object> options = recoveryRequest();
+        long deadline = TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 800;
+        options.put("requestExpiresAt", deadline);
+        CountDownLatch validating = new CountDownLatch(1), release = new CountDownLatch(1), retryStarted = new CountDownLatch(1);
+        Future<Map<String, Object>> original = workers.submit(() -> runtime.create("owner", "channel", options,
+                () -> { }, () -> { validating.countDown(); awaitLatch(release); }));
+        awaitLatch(validating);
+        Thread.sleep(Math.max(1, deadline - TimeUnit.NANOSECONDS.toMillis(System.nanoTime()) + 10));
+        Future<Map<String, Object>> retry = workers.submit(() -> {
+            retryStarted.countDown();
+            return runtime.create("owner", "channel", options);
+        });
+        awaitLatch(retryStarted);
+        assertFalse(retry.isDone(), "A terminal proof cannot overtake the original creation");
+        release.countDown();
+        Map<String, Object> created = original.get(2, TimeUnit.SECONDS);
+        Map<String, Object> recovered = retry.get(2, TimeUnit.SECONDS);
+        assertEquals(created.get("id"), recovered.get("id"));
+        assertEquals("armed", recovered.get("status"));
+        assertEquals(1L, runtime.status().get("activeSessions"));
+    }
+
+    @Test void deniedRetrySerializesAfterOriginalAndCannotBeReopenedByLaterAuthorizedRetry() throws Exception {
+        Map<String, Object> options = recoveryRequest();
+        CountDownLatch authorizing = new CountDownLatch(1), release = new CountDownLatch(1), retryStarted = new CountDownLatch(1);
+        Future<Map<String, Object>> original = workers.submit(() -> runtime.create("owner", "channel", options,
+                () -> { authorizing.countDown(); awaitLatch(release); }, () -> { }));
+        awaitLatch(authorizing);
+        Future<DebugRuntime.ArmRequestRejected> denied = workers.submit(() -> {
+            retryStarted.countDown();
+            return assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create("owner", "channel", options,
+                    () -> { throw new SecurityException("revoked"); }, () -> fail("recovery must skip source validation")));
+        });
+        awaitLatch(retryStarted);
+        assertFalse(denied.isDone());
+        release.countDown();
+        String id = original.get(2, TimeUnit.SECONDS).get("id").toString();
+        assertEquals(options.get("requestId"), denied.get(2, TimeUnit.SECONDS).requestId());
+        assertEquals("closed", runtime.session("owner", id, "review-tab").get("status"));
+        assertEquals("closed", runtime.create("owner", "channel", options).get("status"));
+        assertEquals(0L, runtime.status().get("activeSessions"));
+    }
+
+    @Test void absentExpiredProofSurvivesAuthorizationRestorationAndRuntimeRestart() {
+        Map<String, Object> options = recoveryRequest();
+        options.put("requestExpiresAt", Long.MIN_VALUE);
+        assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create("owner", "channel", options,
+                () -> { throw new SecurityException("revoked"); }, () -> fail("expired request cannot validate source")));
+        runtime.configure(false, false);
+        runtime.configure(true, true);
+        assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create("owner", "channel", options));
+        assertEquals(0L, runtime.status().get("activeSessions"));
+    }
+
+    @Test void denialForAnotherTabCannotCloseTheOriginalLeaseEvenWithItsRequestId() {
+        Map<String, Object> original = recoveryRequest();
+        String id = runtime.create("owner", "channel", original).get("id").toString();
+        Map<String, Object> other = new HashMap<>(original);
+        other.put("tabId", "other-tab");
+        other.put("requestExpiresAt", Long.MIN_VALUE);
+        assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create("owner", "channel", other,
+                () -> { throw new SecurityException("denied"); }, () -> fail("expired request cannot validate source")));
+        assertEquals("armed", runtime.session("owner", id, "review-tab").get("status"));
+        assertEquals(1L, runtime.status().get("activeSessions"));
+    }
+
+    private Map<String, Object> recoveryRequest() {
+        return new HashMap<>(Map.of("tabId", "review-tab", "requestId", UUID.randomUUID().toString(),
+                "requestExpiresAt", runtime.status().get("armRequestExpiresAt"), "leaseMillis", 60_000));
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try { assertTrue(latch.await(3, TimeUnit.SECONDS)); }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new AssertionError(interrupted); }
+    }
+
 
     @Test void stopAndRestartDetachListenersAndRestartLeaseWatchdog() throws Exception {
         String id = create(Map.of()); Future<Object> result = run(compile("var n=1;\nn;", "transformer"), CHANNEL);

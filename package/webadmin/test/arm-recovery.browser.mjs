@@ -10,22 +10,22 @@ const mock = `
 import React from 'react';
 import {createRoot} from 'react-dom/client';
 const query=new URLSearchParams(location.search),mode=query.get('mode');
-let target={channelId:'channel-1'},user={id:'user-1'},session,root,serial=0,capabilities=0,armCalls=0,sourceHeld=false;
-const calls=[],listeners=[],requests=new Map(),heartbeats=[];
+let target={channelId:'channel-1'},user={id:'user-1'},session,root,serial=0,capabilities=0,armCalls=0,sourceHeld=false,commandCalls=0,effects=0;
+const calls=[],listeners=[],requests=new Map(),heartbeats=[],commands=new Map();
 const source=generation=>({id:'source-1',name:'transformer_0',kind:'transformer',hash:'hash-'+generation,generation,text:'source generation '+generation,lineCount:1,breakableLines:[1],authoredMappings:[]});
-const fixture=window.fixture={calls,requests,heartbeats,created:()=>serial,session:()=>session,
+const fixture=window.fixture={calls,requests,heartbeats,created:()=>serial,session:()=>session,effects:()=>effects,
     pause:()=>{session={...session,status:'paused',pauseGeneration:1,frames:[{index:0,sourceId:'source-1',sourceHash:'hash-2',sourceGeneration:2,line:1}]};requests.set(session.requestId,session);},
     close:()=>{session={...session,status:'closed',closeReason:'lease expired'};requests.set(session.requestId,session);},
     logout:()=>{user={id:'user-2'};listeners.forEach(fn=>fn());},unmount:()=>root.unmount()
 };
-const expire=()=>{if(mode==='lease-recovery'&&session&&session.status!=='closed'&&Date.now()>=session.leaseExpiresAt)fixture.close();};
+const expire=()=>{if(['lease-recovery','lease-initial'].includes(mode)&&session&&session.status!=='closed'&&Date.now()>=session.leaseExpiresAt)fixture.close();};
 const api={
     get:async(path,params)=>{
         calls.push(['GET',path,params]);
         if(path.endsWith('/capabilities')){
             capabilities++;
             return JSON.stringify({available:true,apiVersion:1,controlAllowed:true,
-                evaluationAllowed:mode==='watches'||mode==='revoke-engine'||(['revoke-evaluation','lost-denied'].includes(mode)&&capabilities===1),
+                evaluationAllowed:mode==='watches'||mode==='command-retry'||mode==='revoke-engine'||(['revoke-evaluation','lost-denied'].includes(mode)&&capabilities===1),
                 evaluationEnabled:mode!=='revoke-engine'||capabilities===1,
                 globalAllowed:mode==='revoke-global'&&capabilities===1,armRequestExpiresAt:Date.now()+60000+capabilities});
         }
@@ -52,15 +52,22 @@ const api={
                 session={id:'session-'+(++serial),requestId:body.requestId,channelId:body.channelId,status:'armed',pauseGeneration:0,leaseExpiresAt:Date.now()+body.leaseMillis};requests.set(body.requestId,session);
             }
             if(mode==='lease-recovery'&&armCalls===1)await new Promise(resolve=>setTimeout(resolve,12000));
-            if(armCalls===1&&!mode?.startsWith('revoke-'))throw Object.assign(new Error('Arm response interrupted'),mode==='server-error'?{status:503}:{});
+            if(mode==='lease-initial'&&armCalls===1)await new Promise(resolve=>setTimeout(resolve,11500));
+            if(armCalls===1&&!mode?.startsWith('revoke-')&&!['lease-initial','command-retry'].includes(mode))throw Object.assign(new Error('Arm response interrupted'),mode==='server-error'?{status:503}:{});
             if(mode==='retry-lost'&&armCalls===2)throw new Error('Recovery response interrupted');
             if(mode?.startsWith('retry-denied-')&&armCalls===2)throw Object.assign(new Error('Recovery denied without closure proof'),{status:Number(mode.split('-').pop())});
             if(mode==='retry-wrong-proof'&&armCalls===2)throw Object.assign(new Error('Recovery denied without closure proof'),{status:403,body:JSON.stringify({error:'Denied',code:'arm_request_rejected',requestId:'different-request'})});
             if(mode==='logout'||mode==='unmount')await new Promise(resolve=>fixture.releaseArm=resolve);
             expire();return JSON.stringify(requests.get(body.requestId));
         }
-        if(path.endsWith('/heartbeat')){heartbeats.push(Date.now());expire();if(session&&session.status!=='closed')session.leaseExpiresAt=Date.now()+15000;return JSON.stringify(session);}
-        if(path.endsWith('/commands'))return JSON.stringify({status:'completed'});
+        if(path.endsWith('/heartbeat')){heartbeats.push(Date.now());if(mode==='lease-initial')await new Promise(resolve=>setTimeout(resolve,600));expire();if(session&&session.status!=='closed')session.leaseExpiresAt=Date.now()+15000;return JSON.stringify(session);}
+        if(path.endsWith('/commands')){
+            if(mode!=='command-retry')return JSON.stringify({status:'completed'});
+            if(++commandCalls===2)throw Object.assign(new Error('Retry rate limited'),{status:429});
+            if(!commands.has(body.commandId))commands.set(body.commandId,{status:'completed',result:{type:'number',value:++effects}});
+            if(commandCalls===1)throw new Error('Completed command response lost');
+            return JSON.stringify(commands.get(body.commandId));
+        }
         throw new Error('Unexpected POST '+path);
     },
     del:async(path)=>{calls.push(['DELETE',path]);if(!path.endsWith('/'+session.id))throw new Error('Wrong session ended');fixture.close();return '{}';},
@@ -199,6 +206,49 @@ try {
         await page.close();
     }
 
+    const commandPage = await browser.newPage();
+    commandPage.setDefaultTimeout(5000);
+    commandPage.on('pageerror', error => errors.push(error.message));
+    await commandPage.goto(`http://127.0.0.1:${server.address().port}/?mode=command-retry`);
+    await commandPage.getByRole('checkbox', { name: 'Enable evaluation and value editing', exact: true }).check();
+    await commandPage.getByRole('button', { name: 'Arm debugger', exact: true }).click();
+    await expect(commandPage.locator('.dbg-status')).toHaveText('armed');
+    await commandPage.evaluate(() => fixture.pause());
+    await expect(commandPage.locator('.dbg-status')).toHaveText('paused');
+    await commandPage.getByRole('textbox', { name: 'Evaluate in selected frame', exact: true }).fill('counter++');
+    const evaluate = commandPage.getByRole('button', { name: 'Evaluate', exact: true });
+    const checkCommand = commandPage.getByRole('button', { name: 'Check command result', exact: true });
+    await evaluate.click();
+    await expect(checkCommand).toBeEnabled();
+    await checkCommand.click();
+    await expect(commandPage.getByRole('alert')).toContainText('Retry rate limited');
+    await expect(checkCommand).toBeEnabled();
+    await expect(evaluate).toBeDisabled();
+    await commandPage.getByRole('textbox', { name: 'Evaluate in selected frame', exact: true }).evaluate(input => input.closest('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+    assert.equal(await commandPage.evaluate(() => fixture.effects()), 1);
+    await checkCommand.click();
+    await expect(checkCommand).toHaveCount(0);
+    await expect(evaluate).toBeEnabled();
+    const evaluations = await commandPage.evaluate(() => fixture.calls.filter(call => call[2]?.action === 'evaluate').map(call => call[2]));
+    assert.equal(evaluations.length, 3);
+    assert.deepEqual(evaluations, [evaluations[0], evaluations[0], evaluations[0]]);
+    assert.equal(await commandPage.evaluate(() => fixture.effects()), 1, 'retry recovery must not repeat expression side effects');
+    await commandPage.close();
+
+    // A successful response can also consume most of the initial lease.
+    const initialLease = await timedPage('lease-initial');
+    await initialLease.getByRole('button', { name: 'Arm debugger', exact: true }).click();
+    await initialLease.waitForFunction(() => fixture.created() === 1);
+    await initialLease.clock.runFor(11500);
+    await expect(initialLease.locator('.dbg-status')).toHaveText('armed');
+    const armedAt = await initialLease.evaluate(() => Date.now());
+    assert.deepEqual(await initialLease.evaluate(() => fixture.heartbeats), [armedAt]);
+    await initialLease.clock.runFor(4500);
+    await expect(initialLease.locator('.dbg-status')).toHaveText('armed');
+    assert(await initialLease.evaluate(() => fixture.session().leaseExpiresAt > Date.now()));
+    assert.equal((await arms(initialLease)).length, 1);
+    await initialLease.close();
+
     // The production POST timeout consumes 12 seconds of the initial 15-second
     // lease. Recovery must renew now, before the ordinary 3-second timer fires.
     const lease = await timedPage('lease-recovery');
@@ -296,7 +346,7 @@ try {
         await page.close();
     }
     assert.deepEqual(errors, []);
-    console.log('Arm-recovery browser regression passed: lost/network/503 and repeated lost responses reuse one request/session; recovery 401/403/409/429 or wrong-request proof retain the original pending lease; pending settings/watches and stale submissions are blocked; paused/closed recovery, End/Clear, proven expired request then fresh Arm, owner/unmount fencing and cleanup, delayed source recovery; revoked evaluation permission/engine setting/global permission can be cleared before ordinary Arm; recovery after a 12-second timeout renews the 15-second lease immediately; expired absent denied requests unlock settings for fresh Arm.');
+    console.log('Arm-recovery browser regression passed: lost/network/503 and repeated lost responses reuse one request/session; recovery 401/403/409/429 or wrong-request proof retain the original pending lease; pending settings/watches and stale submissions are blocked; paused/closed recovery, End/Clear, proven expired request then fresh Arm, owner/unmount fencing and cleanup, delayed source recovery; revoked evaluation permission/engine setting/global permission can be cleared before ordinary Arm; slow initial success and timeout recovery renew the original lease immediately; interrupted evaluation followed by retry 429 stays locked and recovers without duplicate side effects; expired absent denied requests unlock settings for fresh Arm.');
 } finally {
     await browser?.close();
     await new Promise(resolve => server.close(resolve));

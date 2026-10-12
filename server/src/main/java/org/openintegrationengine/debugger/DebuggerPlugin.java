@@ -27,15 +27,15 @@ public final class DebuggerPlugin implements ServicePlugin, ChannelPlugin {
         return EngineCompatibility.status();
     }
     @Override public String getPluginPointName() { return DebuggerServletInterface.PLUGIN_POINT; }
-    @Override public void init(Properties properties) { configure(properties); }
-    @Override public void update(Properties properties) {
-        DebugRuntime.getInstance().closeAll("Debugger access policy changed; arm a new session");
-        configure(properties);
-    }
-    private void configure(Properties properties) {
-        policy = new AccessPolicy(properties);
+    @Override public void init(Properties properties) { configure(properties, false); }
+    @Override public void update(Properties properties) { configure(properties, true); }
+    private synchronized void configure(Properties properties, boolean closeSessions) {
+        AccessPolicy updated = new AccessPolicy(properties);
+        policy = updated;
+        // Publish restrictions before fencing both existing sessions and Arms still authorizing.
+        if (closeSessions) DebugRuntime.getInstance().closeAll("Debugger access policy changed; arm a new session");
         DebugRuntime.getInstance().setAttachmentGuard(EngineCompatibility::canAttach);
-        DebugRuntime.getInstance().configure(policy.enabled, policy.evaluationEnabled);
+        DebugRuntime.getInstance().configure(updated.enabled, updated.evaluationEnabled);
     }
     @Override public synchronized void start() {
         if (!(ControllerFactory.getFactory().createContextFactoryController() instanceof DebugContextFactoryController)) {
