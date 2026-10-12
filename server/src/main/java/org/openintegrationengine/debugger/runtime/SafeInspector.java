@@ -1,5 +1,6 @@
 package org.openintegrationengine.debugger.runtime;
 
+import com.mirth.connect.server.controllers.ConfigurationController;
 import org.mozilla.javascript.*;
 import org.mozilla.javascript.xmlimpl.XMLLibImpl;
 import org.w3c.dom.CharacterData;
@@ -9,6 +10,7 @@ import org.w3c.dom.Node;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.util.*;
+import java.util.function.Supplier;
 
 /** Bounded JSON previews. Never calls user getters, conversion hooks or arbitrary Java toString. */
 public final class SafeInspector {
@@ -19,9 +21,13 @@ public final class SafeInspector {
             "com.mirth.connect.server.userutil.ChannelMap", "com.mirth.connect.userutil.ResponseMap");
     private static final Object ACCESSOR = new Object();
     private final IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
+    private final Supplier<Map<?, ?>> currentConfiguration;
     private int remaining = 256;
     private int characters = 24_000;
     private long deadline;
+
+    public SafeInspector() { this(() -> ConfigurationController.getInstance().getConfigurationMap()); }
+    SafeInspector(Supplier<Map<?, ?>> currentConfiguration) { this.currentConfiguration = currentConfiguration; }
 
     public Map<String, Object> inspect(Object value) {
         // Java evaluates arguments after constructing the receiver; expression execution is not inspection time.
@@ -40,7 +46,8 @@ public final class SafeInspector {
     }
 
     static Object unwrap(Object value) {
-        if (value != null && (value.getClass() == NativeJavaObject.class || value.getClass() == NativeJavaArray.class))
+        if (value != null && (value.getClass() == NativeJavaObject.class || value.getClass() == NativeJavaArray.class
+                || value.getClass() == NativeJavaMap.class))
             return ((Wrapper) value).unwrap();
         return value;
     }
@@ -55,6 +62,13 @@ public final class SafeInspector {
         Object getter = object.getGetterOrSetter(name, index, false);
         Object setter = object.getGetterOrSetter(name, index, true);
         return (getter != null && getter != Undefined.instance) || (setter != null && setter != Undefined.instance);
+    }
+
+    private boolean configurationMap(Map<?, ?> map) {
+        // Only the engine's current immutable snapshot is trusted. An arbitrary
+        // unmodifiable wrapper can still delegate reads to user-supplied code.
+        return map.getClass().getName().equals("java.util.Collections$UnmodifiableMap")
+                && map == currentConfiguration.get();
     }
 
     private Map<String, Object> preview(Object raw, int depth) {
@@ -110,7 +124,7 @@ public final class SafeInspector {
                         properties.put(index.toString(), preview(accessor(object, null, index) ? ACCESSOR : object.get(index, object), depth + 1));
                     }
                 }
-            } else if (value instanceof Map<?, ?> map && SAFE_MAPS.contains(className)) {
+            } else if (value instanceof Map<?, ?> map && (SAFE_MAPS.contains(className) || configurationMap(map))) {
                 int count = 0;
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
                     if (!room(count++)) { result.put("truncated", true); break; }
@@ -122,7 +136,7 @@ public final class SafeInspector {
                 // Public constructors accept arbitrary Maps. Read the field, then reapply the exact-type allowlist.
                 Field delegate = value.getClass().getDeclaredField("delegate");
                 delegate.setAccessible(true);
-                return preview(delegate.get(value), depth + 1);
+                return preview(delegate.get(value), depth);
             } else if (engineClass(value, "com.mirth.connect.server.util.GlobalVariableStore") ||
                     engineClass(value, "com.mirth.connect.server.util.GlobalChannelVariableStore")) {
                 String field = className.endsWith("GlobalChannelVariableStore") ? "globalChannelVariableMap" : "globalVariableMap";

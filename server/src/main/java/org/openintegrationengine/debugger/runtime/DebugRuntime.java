@@ -16,6 +16,9 @@ public final class DebugRuntime implements Debugger {
     private static final long ARM_REQUEST_WINDOW_MILLIS = 30_000;
     private final SourceRegistry registry = new SourceRegistry();
     private final ConcurrentMap<String, Session> sessions = new ConcurrentHashMap<>();
+    private final Object creationLock = new Object();
+    // create() is serialized; only publication and release notifications share this short lock.
+    private Creation creating;
     private final Map<ContextFactory, ContextFactory.Listener> factories = Collections.synchronizedMap(new WeakHashMap<>());
     private final AtomicInteger pausedCount = new AtomicInteger();
     private volatile Predicate<ContextFactory> attachmentGuard = factory -> true;
@@ -142,46 +145,53 @@ public final class DebugRuntime implements Debugger {
                 }
             }
         }
-        try { authorize.run(); }
-        catch (RuntimeException denied) {
-            if (previous != null) {
-                synchronized (previous) { closeLocked(previous, "Arm authorization failed"); }
-                if (channelId.equals(previous.channel) && previous.creationOptions.equals(options))
+        Creation creation;
+        synchronized (creationLock) { creation = previous == null ? new Creation(channelId) : null; creating = creation; }
+        try {
+            try { authorize.run(); }
+            catch (RuntimeException denied) {
+                if (previous != null) {
+                    synchronized (previous) { closeLocked(previous, "Arm authorization failed"); }
+                    if (channelId.equals(previous.channel) && previous.creationOptions.equals(options))
+                        throw new ArmRequestRejected(requestId, denied);
+                } else if (requestId != null && requestExpiresAt <= now()) {
                     throw new ArmRequestRejected(requestId, denied);
-            } else if (requestId != null && requestExpiresAt <= now()) {
-                throw new ArmRequestRejected(requestId, denied);
+                }
+                throw denied;
             }
-            throw denied;
-        }
-        // The opaque server deadline expires before closed receipts can be evicted.
-        // An absent expired request is terminal even if the runtime is unavailable.
-        if (previous == null && requestId != null && requestExpiresAt <= now())
-            throw new ArmRequestRejected(requestId, new IllegalStateException("Arm request expired; start a new Arm request"));
-        if (!enabled) throw new IllegalStateException("Debugger is disabled or incompatible");
-        if (debuggerConflict) throw new IllegalStateException("Another Rhino debugger owns a context; disable the conflicting debugger and restart the plugin");
-        if (previous != null) {
-            if (!channelId.equals(previous.channel) || !previous.creationOptions.equals(options))
-                throw new IllegalStateException("Arm request ID was reused with different options");
-            return snapshot(previous);
-        }
-        if (requestId != null && requestExpiresAt > now() + ARM_REQUEST_WINDOW_MILLIS)
-            throw new IllegalStateException("Arm request deadline is invalid; refresh capabilities");
-        if (sessions.values().stream().filter(s -> !s.closed).count() >= MAX_SESSIONS) throw new IllegalStateException("Debug session limit reached");
-        if (sessions.size() >= 128) throw new IllegalStateException("Recent session retention limit reached; retry after one minute");
-        Session session = new Session(owner, channelId, options);
-        if (channelId.equals("global") && !bool(options, "includeGlobal", false)) throw new IllegalArgumentException("Global scripts require explicit includeGlobal opt-in");
-        if (session.evaluationEnabled && !evaluationEnabled) throw new SecurityException("Evaluation is disabled by server policy");
-        if (!session.watches.isEmpty() && !session.evaluationEnabled) throw new SecurityException("Watches require elevated evaluation permission");
-        validateFreshSource.run();
-        if (session.sourceId != null) {
-            SourceRegistry.Source source = registry.require(session.sourceId);
-            synchronized (registry) {
-                if (!source.channels.contains(channelId)) throw new IllegalArgumentException("Source has not been observed in this channel");
+            // The opaque server deadline expires before closed receipts can be evicted.
+            // An absent expired request is terminal even if the runtime is unavailable.
+            if (previous == null && requestId != null && requestExpiresAt <= now())
+                throw new ArmRequestRejected(requestId, new IllegalStateException("Arm request expired; start a new Arm request"));
+            if (!enabled) throw new IllegalStateException("Debugger is disabled or incompatible");
+            if (debuggerConflict) throw new IllegalStateException("Another Rhino debugger owns a context; disable the conflicting debugger and restart the plugin");
+            if (previous != null) {
+                if (!channelId.equals(previous.channel) || !previous.creationOptions.equals(options))
+                    throw new IllegalStateException("Arm request ID was reused with different options");
+                return snapshot(previous);
             }
-        }
-        // One tab controls a target per owner; different message filters may coexist without sharing worker ownership.
-        sessions.put(session.id, session);
-        return snapshot(session);
+            if (requestId != null && requestExpiresAt > now() + ARM_REQUEST_WINDOW_MILLIS)
+                throw new IllegalStateException("Arm request deadline is invalid; refresh capabilities");
+            if (sessions.values().stream().filter(s -> !s.closed).count() >= MAX_SESSIONS) throw new IllegalStateException("Debug session limit reached");
+            if (sessions.size() >= 128) throw new IllegalStateException("Recent session retention limit reached; retry after one minute");
+            Session session = new Session(owner, channelId, options, creation.startedAtNanos);
+            if (channelId.equals("global") && !bool(options, "includeGlobal", false)) throw new IllegalArgumentException("Global scripts require explicit includeGlobal opt-in");
+            if (session.evaluationEnabled && !evaluationEnabled) throw new SecurityException("Evaluation is disabled by server policy");
+            if (!session.watches.isEmpty() && !session.evaluationEnabled) throw new SecurityException("Watches require elevated evaluation permission");
+            validateFreshSource.run();
+            if (session.sourceId != null) {
+                SourceRegistry.Source source = registry.require(session.sourceId);
+                synchronized (registry) {
+                    if (!source.channels.contains(channelId)) throw new IllegalArgumentException("Source has not been observed in this channel");
+                }
+            }
+            // One tab controls a target per owner; different message filters may coexist without sharing worker ownership.
+            synchronized (creationLock) {
+                if (creation.closeReason != null) synchronized (session) { closeLocked(session, creation.closeReason); }
+                sessions.put(session.id, session);
+            }
+            return snapshot(session);
+        } finally { synchronized (creationLock) { creating = null; } }
     }
 
     public Map<String, Object> session(String owner, String id) { return snapshot(owned(owner, id, null)); }
@@ -288,7 +298,7 @@ public final class DebugRuntime implements Debugger {
 
     public void invalidate(String channelId, String reason) {
         registry.invalidate(channelId);
-        sessions.values().stream().filter(s -> s.channel.equals(channelId)).forEach(s -> { synchronized (s) { closeLocked(s, reason); } });
+        releaseChannel(channelId, reason);
     }
 
     /** Close existing sessions so neither message nor identity-free work can pause a channel's drain again. */
@@ -298,14 +308,27 @@ public final class DebugRuntime implements Debugger {
 
     /** Delayed engine notifications must not close a session armed after that state change. */
     public void releaseChannel(String channelId, String reason, long eventNanos) {
-        sessions.values().stream().filter(s -> s.channel.equals(channelId) && s.createdAtNanos <= eventNanos).forEach(s -> {
+        List<Session> released;
+        synchronized (creationLock) {
+            if (creating != null && creating.channel.equals(channelId) && creating.startedAtNanos <= eventNanos)
+                creating.closeReason = reason;
+            released = sessions.values().stream().filter(s -> s.channel.equals(channelId) && s.createdAtNanos <= eventNanos).toList();
+        }
+        released.forEach(s -> {
             synchronized (s) {
                 closeLocked(s, reason);
             }
         });
     }
 
-    public void closeAll(String reason) { sessions.values().forEach(s -> { synchronized (s) { closeLocked(s, reason); } }); }
+    public void closeAll(String reason) {
+        List<Session> released;
+        synchronized (creationLock) {
+            if (creating != null) creating.closeReason = reason;
+            released = List.copyOf(sessions.values());
+        }
+        released.forEach(s -> { synchronized (s) { closeLocked(s, reason); } });
+    }
 
     public Map<String, Object> status() {
         Map<String, Object> result = new LinkedHashMap<>();
@@ -686,8 +709,14 @@ public final class DebugRuntime implements Debugger {
             if (result != null) dto.put("result", result); if (error != null) dto.put("error", error); return dto;
         }
     }
+    private static final class Creation {
+        final String channel;
+        final long startedAtNanos = System.nanoTime();
+        String closeReason;
+        Creation(String channel) { this.channel = channel; }
+    }
     private static final class Session {
-        final long createdAtNanos = System.nanoTime();
+        final long createdAtNanos;
         final String id = UUID.randomUUID().toString(), owner, tabId, channel, messageId, connectorId, sourceId, scriptKind;
         final String requestId;
         final Map<String, Object> creationOptions;
@@ -706,7 +735,8 @@ public final class DebugRuntime implements Debugger {
         Identity identity;
         List<Map<String, Object>> frames = List.of(), watchResults = List.of();
         Map<String, Object> inspection = Map.of();
-        Session(String owner, String channel, Map<String, Object> options) {
+        Session(String owner, String channel, Map<String, Object> options, long createdAtNanos) {
+            this.createdAtNanos = createdAtNanos;
             this.owner = owner; this.channel = channel; tabId = requiredString(options, "tabId"); requireText(tabId, "tabId", 128);
             requestId = creationRequestId(options);
             creationOptions = requestId == null ? Map.of() : immutableOptions(options);

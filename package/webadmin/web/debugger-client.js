@@ -127,7 +127,7 @@ export class DebuggerClient {
                 return;
             }
             this.emit({ session, armOptions, pendingArm: null });
-            if (session.status !== 'closed') this.startTimers(retry);
+            if (session.status !== 'closed') this.startTimers();
         } catch (e) {
             if (this.valid(epoch)) {
                 let resolved = false;
@@ -142,12 +142,11 @@ export class DebuggerClient {
         }
         finally { if (this.valid(epoch)) this.emit({ busy: false }); }
     }
-    startTimers(recovered = false) {
+    startTimers() {
         this.clearTimers();
         this.pollTimer = this.timers.setTimeout(() => this.poll(), 500);
-        // Recovery keeps the original deadline, which may be nearly expired.
-        if (recovered) this.heartbeat();
-        else this.leaseTimer = this.timers.setTimeout(() => this.heartbeat(), 3000);
+        // Even a successful first response can consume most of the initial lease.
+        this.heartbeat();
     }
     clearTimers() {
         this.timers.clearTimeout(this.pollTimer);
@@ -178,8 +177,8 @@ export class DebuggerClient {
         if (!id || !this.valid(epoch) || this.state.lost) return;
         try {
             await this.api.post(`/sessions/${enc(id)}/heartbeat`, { tabId: this.tabId });
-            if (this.valid(epoch) && this.state.session?.status !== 'closed') this.leaseTimer = this.timers.setTimeout(() => this.heartbeat(), 3000);
-        } catch (e) { if (this.valid(epoch)) this.lose(e); }
+            if (this.valid(epoch) && !this.state.lost && this.state.session?.status !== 'closed') this.leaseTimer = this.timers.setTimeout(() => this.heartbeat(), 3000);
+        } catch (e) { if (this.valid(epoch) && !this.state.lost) this.lose(e); }
     }
     async disarm() {
         this.assert();
@@ -228,8 +227,12 @@ export class DebuggerClient {
             else if (receipt.status === 'completed' && body.action === 'setBreakpoints') this.emit({ breakpoints: { ...this.state.breakpoints, [body.sourceId]: body.lines } });
             return receipt;
         } catch (e) {
-            // A transport failure is ambiguous: retain the ID/body for a safe retry.
-            if (this.valid(epoch)) this.emit({ error: `${e.message} Check the command result before issuing another command.`, pending: e.status && e.status < 500 ? null : body });
+            // A rejected retry cannot prove whether the original command executed.
+            if (this.valid(epoch)) {
+                const uncertain = retry || !(e.status >= 400 && e.status < 500);
+                this.emit({ error: uncertain ? `${e.message} Check the command result before issuing another command.` : e.message,
+                    pending: uncertain ? body : null });
+            }
         } finally { if (this.valid(epoch)) this.emit({ busy: false }); }
     }
     async setBreakpoints(source, entries) {

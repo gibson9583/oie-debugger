@@ -5,10 +5,12 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
@@ -62,6 +64,89 @@ class DebuggerServletTest {
 
     @AfterEach void cleanup() {
         runtime.shutdown(); new DebuggerPlugin().init(new Properties()); DebugRuntime.getInstance().configure(false, false);
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"allowedUserIds", "allowedChannelIds", "evaluationEnabled", "enabled"})
+    void policyUpdateClosesAnArmAlreadyPastItsAuthorizationCheck(String restriction) throws Exception {
+        DebuggerPlugin plugin = new DebuggerPlugin();
+        DebugRuntime runtime = DebugRuntime.getInstance();
+        plugin.init(new Properties());
+        var workers = Executors.newFixedThreadPool(2);
+        var validated = new CountDownLatch(1);
+        var finishValidation = new CountDownLatch(1);
+        try {
+            AccessPolicy originalPolicy = DebuggerPlugin.policy();
+            Map<String,Object> options = Map.of("tabId", "review-tab", "evaluationEnabled", true,
+                    "requestId", UUID.randomUUID().toString(), "requestExpiresAt", runtime.status().get("armRequestExpiresAt"));
+            Runnable authorize = () -> {
+                AccessPolicy current = DebuggerPlugin.policy();
+                if (!current.allows(7) || !current.channel("review-channel") || !current.evaluates(7))
+                    throw new SecurityException("Denied");
+            };
+            var creating = workers.submit(() -> runtime.create("7:review-browser", "review-channel",
+                    options, authorize,
+                    () -> { validated.countDown(); try { assertTrue(finishValidation.await(3, TimeUnit.SECONDS)); }
+                        catch (InterruptedException e) { throw new RuntimeException(e); } }));
+            assertTrue(validated.await(3, TimeUnit.SECONDS));
+            Properties revoked = new Properties();
+            revoked.setProperty(restriction, restriction.equals("allowedUserIds") ? "8"
+                    : restriction.equals("allowedChannelIds") ? "another-channel" : "false");
+            var updating = workers.submit(() -> plugin.update(revoked));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+            while (DebuggerPlugin.policy() == originalPolicy && System.nanoTime() < deadline) Thread.sleep(1);
+            assertNotSame(originalPolicy, DebuggerPlugin.policy(), "New policy must be published before release");
+            finishValidation.countDown();
+            String id = creating.get(3, TimeUnit.SECONDS).get("id").toString();
+            updating.get(3, TimeUnit.SECONDS);
+            Map<String, Object> finalSession = runtime.session("7:review-browser", id, "review-tab");
+            assertEquals("closed", finalSession.get("status"), "An old-policy Arm must not survive a completed settings change");
+            assertThrows(DebugRuntime.ArmRequestRejected.class, () -> runtime.create("7:review-browser", "review-channel",
+                    options, authorize, () -> fail("A denied recovery cannot validate source")));
+        } finally {
+            finishValidation.countDown();
+            runtime.shutdown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS));
+            plugin.init(new Properties());
+            runtime.shutdown();
+        }
+    }
+
+    @Test void overlappingPolicyUpdatesPublishInTheSameOrderAsRuntimeConfiguration() throws Exception {
+        DebuggerPlugin plugin = new DebuggerPlugin();
+        DebugRuntime runtime = DebugRuntime.getInstance();
+        plugin.init(new Properties());
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        Properties first = new Properties(); first.setProperty("enabled", "false");
+        Properties second = new Properties(); second.setProperty("evaluationEnabled", "false");
+        AtomicReference<Thread> secondThread = new AtomicReference<>();
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        try {
+            Future<?> firstUpdate, secondUpdate;
+            synchronized (runtime) {
+                // Hold only the runtime application phase so the first policy is already visible.
+                firstUpdate = workers.submit(() -> plugin.update(first));
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (DebuggerPlugin.policy().enabled && System.nanoTime() < deadline) Thread.sleep(1);
+                AccessPolicy firstPolicy = DebuggerPlugin.policy();
+                assertFalse(firstPolicy.enabled);
+                secondUpdate = workers.submit(() -> {
+                    secondThread.set(Thread.currentThread()); secondStarted.countDown(); plugin.update(second);
+                });
+                assertTrue(secondStarted.await(3, TimeUnit.SECONDS));
+                deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (secondThread.get().getState() != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.sleep(1);
+                assertEquals(Thread.State.BLOCKED, secondThread.get().getState());
+                assertSame(firstPolicy, DebuggerPlugin.policy(), "The next update must wait before publishing its policy");
+            }
+            firstUpdate.get(3, TimeUnit.SECONDS); secondUpdate.get(3, TimeUnit.SECONDS);
+            assertTrue(DebuggerPlugin.policy().enabled); assertFalse(DebuggerPlugin.policy().evaluationEnabled);
+            assertEquals(DebuggerPlugin.policy().enabled, runtime.status().get("enabled"));
+            assertEquals(DebuggerPlugin.policy().evaluationEnabled, runtime.status().get("evaluationEnabled"));
+        } finally {
+            workers.shutdownNow(); assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS));
+            plugin.init(new Properties()); runtime.shutdown();
+        }
     }
 
     private void applyPolicy() { new DebuggerPlugin().init(policy); }

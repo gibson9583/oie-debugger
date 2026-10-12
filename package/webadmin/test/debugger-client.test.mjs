@@ -6,11 +6,15 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a, b)
 const session = (patch = {}) => ({ id: 's-1', status: 'paused', channelId: 'channel-1', pauseGeneration: 2, frames: [], ...patch });
 function fixture(overrides = {}) {
     let owner = 'engine-a/user-a', serial = 0;
-    const calls = [], capabilityCalls = [], scheduled = new Map();
+    const calls = [], capabilityCalls = [], heartbeatCalls = [], scheduled = new Map();
     const transport = Object.fromEntries(['get', 'post', 'put', 'del'].map(method => [method, async (...args) => {
         if (method === 'get' && args[0] === '/capabilities') {
             capabilityCalls.push(args);
             return overrides.capabilities ? overrides.capabilities(...args) : { available: true, apiVersion: 1, controlAllowed: true, armRequestExpiresAt: 30000 };
+        }
+        if (method === 'post' && args[0].endsWith('/heartbeat')) {
+            heartbeatCalls.push([method, ...args]);
+            return overrides.heartbeat ? overrides.heartbeat(...args) : {};
         }
         calls.push([method, ...args]);
         if (method === 'post' && args[1]?.action === 'setBreakpoints' && overrides.breakpointCommand) return overrides.breakpointCommand(...args);
@@ -21,7 +25,7 @@ function fixture(overrides = {}) {
         setTimeout: (fn, ms) => { const id = ++serial; scheduled.set(id, { fn, ms }); return id; },
         clearTimeout: id => scheduled.delete(id),
     } });
-    return { client, calls, capabilityCalls, scheduled, owner: value => { owner = value; } };
+    return { client, calls, capabilityCalls, heartbeatCalls, scheduled, owner: value => { owner = value; } };
 }
 
 test('plain JSON transport preserves singleton objects and literal request payloads', async () => {
@@ -307,7 +311,6 @@ test('lost arm response retains one creation request and recovers the original p
     const created = new Map();
     let loseResponse = true;
     const { client, calls, capabilityCalls, scheduled } = fixture({ post: (path, body) => {
-        if (path.endsWith('/heartbeat')) return {};
         assert.equal(path, '/sessions');
         if (!created.has(body.requestId)) created.set(body.requestId, session({ id: `session-${created.size + 1}` }));
         if (loseResponse) { loseResponse = false; throw new Error('connection reset after creation'); }
@@ -336,23 +339,46 @@ test('lost arm response retains one creation request and recovers the original p
     client.dispose();
 });
 
+test('a slow successful initial arm renews immediately while its original lease is still reachable', async () => {
+    let now = 0, deadline = 15000;
+    const { client, heartbeatCalls, scheduled } = fixture({
+        post: () => { now = 11500; return session({ status: 'armed', leaseExpiresAt: deadline }); },
+        heartbeat: () => {
+            now += 600; // Renewal transit time; waiting another three seconds would expire the lease.
+            if (now >= deadline) return session({ status: 'closed' });
+            deadline = now + 15000;
+            return session({ status: 'armed', leaseExpiresAt: deadline });
+        },
+    });
+    await client.arm({ channelId: 'channel-1', leaseMillis: 15000 });
+    assert.equal(heartbeatCalls.length, 1);
+    assert.equal(deadline, 27100, 'renewal arrives before the initial 15-second deadline');
+    assert.equal(client.state.lost, false);
+    assert.equal(client.state.session.status, 'armed');
+    assert.equal(scheduled.size, 2);
+    client.dispose();
+    assert.equal(scheduled.size, 0);
+});
+
 test('recovering after the arm timeout renews the original lease before the next timer', async () => {
     let now = 0, deadline = 15000, attempt = 0;
-    const { client, calls, scheduled } = fixture({ post: path => {
-        if (path.endsWith('/heartbeat')) {
+    const { client, heartbeatCalls, scheduled } = fixture({
+        heartbeat: () => {
             assert(now < deadline, 'the recovered lease must still be live at renewal');
             deadline = now + 15000;
             return session({ status: 'armed' });
-        }
-        if (++attempt === 1) { now = 12000; throw new Error('No response after 12 seconds'); }
-        return session({ status: 'armed' }); // Recovery does not extend the server lease.
-    } });
+        },
+        post: () => {
+            if (++attempt === 1) { now = 12000; throw new Error('No response after 12 seconds'); }
+            return session({ status: 'armed' }); // Recovery does not extend the server lease.
+        },
+    });
     await client.arm({ channelId: 'channel-1', leaseMillis: 15000 });
     assert.equal(scheduled.size, 0);
     now = 12100;
     await client.arm(null, true);
     assert.equal(deadline, 27100, 'renew before waiting another three seconds');
-    assert.deepEqual(calls.at(-1), ['post', '/sessions/s-1/heartbeat', { tabId: client.tabId }]);
+    assert.deepEqual(heartbeatCalls.at(-1), ['post', '/sessions/s-1/heartbeat', { tabId: client.tabId }]);
     assert.equal(client.state.pendingArm, null);
     assert.equal(client.state.lost, false);
     assert.equal(scheduled.size, 2, 'resume normal polling and heartbeat cadence');
@@ -361,11 +387,13 @@ test('recovering after the arm timeout renews the original lease before the next
 
 test('failed recovery renewal keeps the known session and stops polling', async () => {
     let attempt = 0;
-    const { client, calls, scheduled } = fixture({ post: path => {
-        if (path.endsWith('/heartbeat')) throw new Error('Renewal denied');
-        if (++attempt === 1) throw new Error('Arm response lost');
-        return session();
-    } });
+    const { client, calls, scheduled } = fixture({
+        heartbeat: () => { throw new Error('Renewal denied'); },
+        post: () => {
+            if (++attempt === 1) throw new Error('Arm response lost');
+            return session();
+        },
+    });
     await client.arm({ channelId: 'channel-1' });
     await client.arm(null, true);
     assert.equal(client.state.session.id, 's-1');
@@ -378,24 +406,43 @@ test('failed recovery renewal keeps the known session and stops polling', async 
     assert.deepEqual(calls.at(-1), ['del', '/sessions/s-1', { tabId: client.tabId }]);
 });
 
-test('in-flight recovery renewal cannot restart timers after ownership or session changes', async () => {
-    for (const change of ['dispose', 'owner', 'closed']) {
+test('failed initial renewal keeps the known session disconnected until it is ended', async () => {
+    const { client, calls, heartbeatCalls, scheduled } = fixture({ heartbeat: () => { throw new Error('Initial renewal failed'); } });
+    await client.arm({ channelId: 'channel-1' });
+    assert.equal(client.state.session.id, 's-1');
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.busy, false);
+    assert.equal(client.state.lost, true);
+    assert.match(client.state.error, /Initial renewal failed/);
+    assert.equal(scheduled.size, 0);
+    assert.equal(heartbeatCalls.length, 1);
+    await client.command('continue');
+    assert.equal(calls.length, 1, 'a failed initial renewal cannot leave execution controls usable');
+    await client.disarm();
+    assert.equal(client.state.session, null);
+    client.dispose();
+});
+
+test('in-flight initial or recovery renewal cannot restart timers after ownership, session or connection changes', async () => {
+    for (const recovered of [false, true]) for (const change of ['dispose', 'owner', 'closed', 'disarm', 'lost']) {
         for (const fail of [false, true]) {
             const renewal = deferred();
             let attempt = 0;
             const { client, scheduled, owner } = fixture({
                 get: () => session({ status: 'closed' }),
-                post: path => {
-                    if (path.endsWith('/heartbeat')) return renewal.promise;
-                    if (++attempt === 1) throw new Error('Arm response lost');
+                heartbeat: () => renewal.promise,
+                post: () => {
+                    if (++attempt === 1 && recovered) throw new Error('Arm response lost');
                     return session();
                 },
             });
             await client.arm({ channelId: 'channel-1' });
-            await client.arm(null, true);
+            if (recovered) await client.arm(null, true);
             if (change === 'dispose') client.dispose();
             else if (change === 'owner') owner('engine-b/user-a');
-            else await client.poll();
+            else if (change === 'closed') await client.poll();
+            else if (change === 'disarm') await client.disarm();
+            else client.lose(new Error('Poll failed'));
             const state = client.state, timerCount = scheduled.size;
             if (fail) renewal.reject(new Error('Stale renewal failure'));
             else renewal.resolve(session());
@@ -454,7 +501,6 @@ test('a recovery HTTP rejection without matching proof cannot discard a possibly
         for (const body of [undefined, '<html>proxy error</html>', JSON.stringify({ code: 'arm_request_rejected', requestId: 'another-request' })]) {
             let attempt = 0;
             const { client, calls, capabilityCalls } = fixture({ post: path => {
-                if (path.endsWith('/heartbeat')) return {};
                 if (++attempt === 1) throw new Error('response lost');
                 if (attempt === 2) throw Object.assign(new Error('request rejected before recovery'), { status, body });
                 return session();
@@ -552,15 +598,21 @@ test('changed owners cannot recover an ambiguous arm or send cleanup to another 
 });
 
 test('lease renewal and polling stop on unmount or a failed heartbeat', async () => {
-    const { client, calls, scheduled } = fixture({ post: path => path.endsWith('/heartbeat') ? Promise.reject(new Error('offline')) : session() });
+    let fail = false;
+    const { client, calls, heartbeatCalls, scheduled } = fixture({ heartbeat: () => {
+        if (fail) throw new Error('offline');
+        return session();
+    } });
     await client.arm({ channelId: 'channel-1' });
     assert.equal(scheduled.size, 2);
+    fail = true;
     await client.heartbeat();
     assert.equal(scheduled.size, 0);
     assert.equal(client.state.lost, true);
-    const count = calls.length;
+    const count = calls.length, renewals = heartbeatCalls.length;
     await client.heartbeat(); await client.poll();
     assert.equal(calls.length, count);
+    assert.equal(heartbeatCalls.length, renewals);
     client.dispose();
 });
 
@@ -577,6 +629,63 @@ test('ambiguous command failures retain their exact command ID and body for retr
     assert.equal(client.state.pending, null);
     assert.equal(client.state.receipt.result, 7);
     client.dispose();
+});
+
+test('rejected command retries retain unknown or queued mutations until the original receipt is recovered', async () => {
+    for (const original of ['delayed', 'completed', 'pending']) for (const status of [400, 403, 409, 429]) {
+        const receipts = new Map();
+        let attempts = 0, applications = 0, delayedOriginal;
+        const apply = body => {
+            if (!receipts.has(body.commandId)) receipts.set(body.commandId, { status: 'completed', result: ++applications });
+            return receipts.get(body.commandId);
+        };
+        const { client, calls } = fixture({ post: (path, body) => {
+            if (path === '/sessions') return session();
+            if (++attempts === 1) {
+                delayedOriginal = () => apply(body);
+                if (original === 'completed') delayedOriginal();
+                if (original === 'pending') return { status: 'pending' };
+                throw new Error('Command response interrupted');
+            }
+            if (attempts === 2) throw Object.assign(new Error('Retry rejected without an outcome'), { status });
+            return apply(body);
+        } });
+        await client.arm({ channelId: 'channel-1', evaluationEnabled: true });
+        await client.command('evaluate', { expression: 'counter++', frameIndex: 0 });
+        const pending = client.state.pending;
+        await client.command('', {}, true);
+        assert.equal(client.state.pending, pending);
+        assert.match(client.state.error, /Check the command result/);
+        await assert.rejects(client.command('evaluate', { expression: 'counter++' }), /pending command/);
+        assert.equal(attempts, 2, 'no new mutation may bypass the unresolved request');
+        await client.command('', {}, true);
+        delayedOriginal();
+        assert.equal(client.state.pending, null);
+        assert.equal(applications, 1, 'the original command is applied once regardless of delivery order');
+        assert.deepEqual(calls.filter(call => call[1].endsWith('/commands')).map(call => call[2]), [pending, pending, pending]);
+        client.dispose();
+    }
+});
+
+test('a rejection of the first command attempt permits correction without an unavailable retry action', async () => {
+    for (const status of [400, 403, 409, 429]) {
+        let attempts = 0;
+        const { client, calls } = fixture({ post: (path, body) => {
+            if (path === '/sessions') return session();
+            if (++attempts === 1) throw Object.assign(new Error('Command rejected'), { status });
+            return { status: 'completed', result: 1 };
+        } });
+        await client.arm({ channelId: 'channel-1' });
+        await client.command('evaluate', { expression: 'invalid' });
+        assert.equal(client.state.pending, null);
+        assert.equal(client.state.error, 'Command rejected');
+        await client.command('evaluate', { expression: '1' });
+        const commands = calls.filter(call => call[1].endsWith('/commands'));
+        assert.equal(commands.length, 2);
+        assert.notEqual(commands[0][2].commandId, commands[1][2].commandId);
+        assert.equal(client.state.error, '');
+        client.dispose();
+    }
 });
 
 test('queued commands automatically resolve by polling the original receipt and disposal cancels polling', async () => {
@@ -669,7 +778,7 @@ test('breakpoint mutation carries compiled identity and confirms only after serv
 });
 
 test('breakpoint uncertainty blocks further changes and reuses its receipt before any newer write', async () => {
-    for (const alreadyApplied of [false, true]) {
+    for (const alreadyApplied of [false, true]) for (const retryStatus of [null, 429]) {
         const receipts = new Map();
         let serverLines = [], applications = 0, requests = 0, delayedOriginal;
         // Model the server contract: cached command IDs never apply twice, even
@@ -690,6 +799,7 @@ test('breakpoint uncertainty blocks further changes and reuses its receipt befor
                     if (alreadyApplied) delayedOriginal();
                     throw new Error('No confirmed response');
                 }
+                if (requests === 2 && retryStatus) throw Object.assign(new Error('Retry rejected'), { status: retryStatus });
                 return server(body);
             },
         });
@@ -705,6 +815,12 @@ test('breakpoint uncertainty blocks further changes and reuses its receipt befor
         await client.poll();
         assert.equal(client.state.pending, pending);
         await client.command('', {}, true);
+        if (retryStatus) {
+            assert.equal(client.state.pending, pending);
+            assert.equal(await client.setBreakpoints(source, [{ line: 8 }]), false);
+            assert.equal(requests, 2);
+            await client.command('', {}, true);
+        }
         assert.equal(client.state.pending, null);
         assert.deepEqual(client.state.breakpoints.src, serverLines);
         assert.equal(applications, 1);

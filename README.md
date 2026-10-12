@@ -72,4 +72,6 @@ Use development or test traffic. Pausing can hold transactions and cause upstrea
 
 Watches, conditions, and value edits run JavaScript with engine privileges and may change data or call external systems. Blocking Java calls and scripts without debugger callbacks cannot always be interrupted. The debugger cannot undo processing, reverse execution, or step through Java code. Shared maps may change while another worker runs.
 
+Automatic previews inspect supported maps without running getters or custom map methods. OIE's read-only `sourceMap` and other unrecognized map wrappers remain opaque. With evaluation enabled, use **Evaluate** to read an individual value, for example `sourceMap.get("key")`. Evaluation explicitly runs script code and is subject to the permissions above.
+
 Licensed under the [Mozilla Public License 2.0](LICENSE).
