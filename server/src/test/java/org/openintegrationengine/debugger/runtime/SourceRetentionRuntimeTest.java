@@ -32,11 +32,11 @@ class SourceRetentionRuntimeTest {
                     "sourceId", sourceId, "breakOnEntry", false)).get("id").toString();
             runtime.breakpoints("owner", id, Map.of("tabId", "tab", "sourceId", sourceId,
                     "sourceHash", source.get("hash"), "sourceGeneration", source.get("generation"), "lines", List.of(2),
-                    "commandId", "set-breakpoint", "expectedPauseGeneration", 0));
+                    "commandId", "set-breakpoint", "commandSequence", 1, "expectedPauseGeneration", 0));
             Future<Object> result = worker.submit(() -> execute(factory, first));
             Map<String, Object> paused = awaitPause(runtime, id);
             assertEquals("breakpoint", paused.get("reason"));
-            runtime.command("owner", id, Map.of("tabId", "tab", "commandId", "continue", "action", "continue",
+            runtime.command("owner", id, Map.of("tabId", "tab", "commandId", "continue", "commandSequence", 2, "action", "continue",
                     "expectedPauseGeneration", paused.get("pauseGeneration")));
             assertEquals(2.0, result.get(2, TimeUnit.SECONDS));
             assertEquals("armed", runtime.session("owner", id, "tab").get("status"));

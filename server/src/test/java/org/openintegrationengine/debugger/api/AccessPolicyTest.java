@@ -6,15 +6,25 @@ import org.openintegrationengine.debugger.DebuggerPlugin;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AccessPolicyTest {
+    private static Properties enabledProperties() {
+        Properties properties = new Properties();
+        properties.setProperty("enabled", "true");
+        return properties;
+    }
+
+    @Test void missingEnabledPropertyDefaultsOff() {
+        assertFalse(new AccessPolicy(new Properties()).enabled);
+    }
+
     @Test void absentRestrictionsDeferAllCapabilitiesToNativeEngineAuthorization() {
-        AccessPolicy policy = new AccessPolicy(new Properties());
+        AccessPolicy policy = new AccessPolicy(enabledProperties());
         assertTrue(policy.allows(7)); assertTrue(policy.evaluates(7)); assertTrue(policy.global(7));
         assertTrue(policy.channel("channel-a")); assertTrue(policy.channel("channel-b"));
         assertFalse(policy.channel(null)); assertFalse(policy.channel("")); assertFalse(policy.channel(" "));
     }
 
     @Test void previouslyPersistedEmptyAndWhitespaceListsAlsoInheritNativeAuthorization() {
-        Properties properties = new Properties();
+        Properties properties = enabledProperties();
         properties.setProperty("allowedUserIds", ""); properties.setProperty("evaluationUserIds", " , \t, ");
         properties.setProperty("globalUserIds", " "); properties.setProperty("allowedChannelIds", ",,");
         AccessPolicy policy = new AccessPolicy(properties);
@@ -23,13 +33,16 @@ class AccessPolicyTest {
 
     @Test void shippedDefaultsEnableEvaluationSubjectToNativePermission() {
         Properties properties = new DebuggerPlugin().getDefaultProperties();
+        assertEquals("false", properties.getProperty("enabled"));
+        assertFalse(new AccessPolicy(properties).allows(7));
         assertEquals("true", properties.getProperty("evaluationEnabled"));
+        properties.setProperty("enabled", "true");
         AccessPolicy policy = new AccessPolicy(properties);
         assertTrue(policy.allows(7)); assertTrue(policy.evaluates(7)); assertTrue(policy.global(7)); assertTrue(policy.channel("channel-a"));
     }
 
     @Test void explicitEvaluationKillSwitchSurvivesOtherwiseEmptyLegacyConfiguration() {
-        Properties properties = new Properties(); properties.setProperty("allowedUserIds", "");
+        Properties properties = enabledProperties(); properties.setProperty("allowedUserIds", "");
         properties.setProperty("evaluationUserIds", ""); properties.setProperty("evaluationEnabled", "false");
         AccessPolicy policy = new AccessPolicy(properties);
         assertTrue(policy.allows(7)); assertFalse(policy.evaluationEnabled); assertFalse(policy.evaluates(7));
@@ -37,7 +50,7 @@ class AccessPolicyTest {
     }
 
     @Test void nonemptyEvaluationGlobalAndChannelRestrictionsRemainIndependent() {
-        Properties properties = new Properties();
+        Properties properties = enabledProperties();
         properties.setProperty("allowedUserIds", "1, 2"); properties.setProperty("allowedChannelIds", "channel-a");
         properties.setProperty("evaluationUserIds", "2,3"); properties.setProperty("globalUserIds", "1,3");
         AccessPolicy policy = new AccessPolicy(properties);
@@ -47,20 +60,20 @@ class AccessPolicyTest {
     }
 
     @Test void emptySubordinateListsDoNotBypassAnExplicitUserRestriction() {
-        Properties properties = new Properties(); properties.setProperty("allowedUserIds", "7");
+        Properties properties = enabledProperties(); properties.setProperty("allowedUserIds", "7");
         AccessPolicy policy = new AccessPolicy(properties);
         assertTrue(policy.allows(7)); assertTrue(policy.evaluates(7)); assertTrue(policy.global(7));
         assertFalse(policy.allows(8)); assertFalse(policy.evaluates(8)); assertFalse(policy.global(8));
     }
 
     @Test void disabledPluginRemainsAnExplicitKillSwitch() {
-        Properties properties = new Properties(); properties.setProperty("enabled", "false");
+        Properties properties = enabledProperties(); properties.setProperty("enabled", "false");
         AccessPolicy policy = new AccessPolicy(properties);
         assertFalse(policy.allows(7)); assertFalse(policy.evaluates(7)); assertFalse(policy.global(7));
     }
 
     @Test void wildcardIsOnlySupportedForChannels() {
-        Properties properties = new Properties(); properties.setProperty("allowedUserIds", "*"); properties.setProperty("allowedChannelIds", "*");
+        Properties properties = enabledProperties(); properties.setProperty("allowedUserIds", "*"); properties.setProperty("allowedChannelIds", "*");
         AccessPolicy policy = new AccessPolicy(properties);
         assertFalse(policy.allows(7)); assertTrue(policy.channel("channel-b")); assertFalse(policy.channel(""));
     }

@@ -10,7 +10,7 @@ function fixture(overrides = {}) {
     const transport = Object.fromEntries(['get', 'post', 'put', 'del'].map(method => [method, async (...args) => {
         if (method === 'get' && args[0] === '/capabilities') {
             capabilityCalls.push(args);
-            return overrides.capabilities ? overrides.capabilities(...args) : { available: true, apiVersion: 1, controlAllowed: true, armRequestExpiresAt: 30000 };
+            return overrides.capabilities ? overrides.capabilities(...args) : { available: true, apiVersion: 1, commandProtocol: 2, controlAllowed: true, armRequestExpiresAt: 30000 };
         }
         if (method === 'post' && args[0].endsWith('/heartbeat')) {
             heartbeatCalls.push([method, ...args]);
@@ -474,7 +474,7 @@ test('recovering a closed arm result never renews or recreates the expired sessi
 test('expired absent arm requests terminate recovery and the next deliberate arm uses a new request', async () => {
     let attempt = 0, deadline = 30000;
     const { client, calls, capabilityCalls } = fixture({
-        capabilities: () => ({ available: true, apiVersion: 1, armRequestExpiresAt: deadline }),
+        capabilities: () => ({ available: true, apiVersion: 1, commandProtocol: 2, armRequestExpiresAt: deadline }),
         post: (path, body) => {
             if (++attempt === 1) throw new Error('response lost');
             if (attempt === 2) throw Object.assign(new Error('Arm request expired'), { status: 409,
@@ -537,9 +537,9 @@ test('confirmed authorization rejection releases pending arm settings for a fres
 });
 
 test('failed or denied capability preflight cannot create an unknown lease', async () => {
-    for (const capabilities of [new Error('offline'), { available: false, apiVersion: 1 },
-            { available: true, apiVersion: 1, controlAllowed: false, armRequestExpiresAt: 30000 },
-            { available: true, apiVersion: 1 }]) {
+    for (const capabilities of [new Error('offline'), { available: false, apiVersion: 1, commandProtocol: 2 },
+            { available: true, apiVersion: 1, commandProtocol: 2, controlAllowed: false, armRequestExpiresAt: 30000 },
+            { available: true, apiVersion: 1, commandProtocol: 2 }]) {
         const { client, calls } = fixture({ capabilities: () => {
             if (capabilities instanceof Error) throw capabilities;
             return capabilities;
@@ -559,7 +559,7 @@ test('disposal or owner change during capability preflight prevents session crea
         const { client, calls, owner } = fixture({ capabilities: () => pending.promise });
         const arm = client.arm({ channelId: 'channel-1' });
         if (dispose) client.dispose(); else owner('engine-b/user-a');
-        pending.resolve({ available: true, apiVersion: 1, armRequestExpiresAt: 30000 });
+        pending.resolve({ available: true, apiVersion: 1, commandProtocol: 2, armRequestExpiresAt: 30000 });
         await arm;
         assert.equal(calls.length, 0);
         assert.equal(client.state.pendingArm, null);
@@ -771,7 +771,7 @@ test('breakpoint mutation carries compiled identity and confirms only after serv
     assert.deepEqual(client.state.breakpoints, {});
     assert.equal(calls[1][0], 'post');
     assert.equal(calls[1][1], '/sessions/s-1/commands');
-    assert.deepEqual(calls[1][2], { tabId: client.tabId, commandId: client.state.pending.commandId, expectedPauseGeneration: 2, action: 'setBreakpoints', sourceId: 'src', sourceHash: 'hash', sourceGeneration: 3, lines: [{ line: 4, hitCount: 1, enabled: true, condition: '' }] });
+    assert.deepEqual(calls[1][2], { tabId: client.tabId, commandId: client.state.pending.commandId, commandSequence: client.state.pending.commandSequence, expectedPauseGeneration: 2, action: 'setBreakpoints', sourceId: 'src', sourceHash: 'hash', sourceGeneration: 3, lines: [{ line: 4, hitCount: 1, enabled: true, condition: '' }] });
     receipt.resolve({ status: 'completed' }); await write;
     assert.equal(client.state.breakpoints.src[0].line, 4);
     client.dispose();
@@ -881,7 +881,7 @@ test('run to authored step confirms additive breakpoint before continuing exact 
     client.emit({ breakpoints: { src: original } });
     const running = client.runToAuthoredStep(source, source.authoredMappings[0]);
     assert.equal(calls.length, 2); assert.equal(calls[1][0], 'post'); assert.equal(calls[1][2].action, 'setBreakpoints');
-    assert.deepEqual(calls[1][2], { tabId: client.tabId, commandId: client.state.pending.commandId, expectedPauseGeneration: 2, action: 'setBreakpoints', sourceId: 'src', sourceHash: 'compiled-hash', sourceGeneration: 3,
+    assert.deepEqual(calls[1][2], { tabId: client.tabId, commandId: client.state.pending.commandId, commandSequence: client.state.pending.commandSequence, expectedPauseGeneration: 2, action: 'setBreakpoints', sourceId: 'src', sourceHash: 'compiled-hash', sourceGeneration: 3,
         lines: [...original, { line: 6, condition: '', hitCount: 1, enabled: true }] });
     assert.equal(client.state.session.status, 'paused');
     installed.resolve({ status: 'completed' }); assert.deepEqual(await running, { line: 6, alreadyPaused: false });
@@ -998,5 +998,24 @@ test('a queued run-to-step breakpoint confirms on retry without automatically re
     await client.runToAuthoredStep(source, source.authoredMappings[0]);
     assert.equal(requests, 2);
     assert.equal(calls.filter(call => call[2]?.action === 'continue').length, 1);
+    client.dispose();
+});
+
+
+test('command sequences increase beyond 256 and restart from a recovered session high-water mark', async () => {
+    const { client, calls } = fixture({ post: (path) => path === '/sessions' ? session({ lastCommandSequence: 800 }) : { status: 'completed' } });
+    await client.arm({ channelId: 'channel-1' });
+    for (let i = 0; i < 1000; i++) await client.command('inspect');
+    const sequences = calls.filter(call => call[1].endsWith('/commands')).map(call => call[2].commandSequence);
+    assert.deepEqual(sequences, Array.from({ length: 1000 }, (_, i) => 801 + i));
+    client.dispose();
+});
+
+
+test('a server without the sequence protocol cannot create a new lease', async () => {
+    const { client, calls } = fixture({ capabilities: () => ({ available: true, apiVersion: 1, armRequestExpiresAt: 30000 }) });
+    await client.arm({ channelId: 'channel-1' });
+    assert.match(client.state.error, /Reload the debugger/);
+    assert.equal(calls.length, 0);
     client.dispose();
 });

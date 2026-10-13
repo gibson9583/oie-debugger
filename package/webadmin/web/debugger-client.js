@@ -63,6 +63,7 @@ export class DebuggerClient {
         this.sourceEpoch = 0;
         this.listEpoch = 0;
         this.snapshotRevision = 0;
+        this.commandSequence = 0;
         this.state = { capabilities: null, sources: [], source: null, session: null, armOptions: null, pendingArm: null, error: '', busy: false, lost: false, receipt: null, pending: null, breakpoints: {} };
     }
     emit(patch) { this.state = { ...this.state, ...patch }; if (this.alive) this.changed(this.state); }
@@ -116,7 +117,8 @@ export class DebuggerClient {
                 this.emit({ capabilities });
                 if (!capabilities?.available || capabilities.apiVersion !== 1 || capabilities.controlAllowed === false)
                     throw new Error(capabilities?.reason || 'Debugger control is unavailable.');
-                if (!Number.isSafeInteger(capabilities.armRequestExpiresAt)) throw new Error('Reload the debugger after updating the engine plugin.');
+                if (!Number.isSafeInteger(capabilities.armRequestExpiresAt) || capabilities.commandProtocol !== 2)
+                    throw new Error('Reload the debugger after updating the engine plugin.');
                 request = { ...armOptions, tabId: this.tabId, requestId: this.newId(), requestExpiresAt: capabilities.armRequestExpiresAt };
             }
             const session = await this.api.post('/sessions', request);
@@ -127,6 +129,7 @@ export class DebuggerClient {
                 return;
             }
             this.emit({ session, armOptions, pendingArm: null });
+            this.commandSequence = session.lastCommandSequence || 0;
             if (session.status !== 'closed') this.startTimers();
         } catch (e) {
             if (this.valid(epoch)) {
@@ -200,7 +203,8 @@ export class DebuggerClient {
         const session = this.state.session;
         if (!session || this.state.lost || this.state.busy || session.status === 'closed') return;
         if (!retry && this.state.pending) throw new Error('Resolve the pending command before sending another.');
-        const body = retry ? this.state.pending : { ...fields, tabId: this.tabId, commandId: this.newId(), expectedPauseGeneration: session.pauseGeneration, action };
+        const body = retry ? this.state.pending : { ...fields, tabId: this.tabId, commandId: this.newId(),
+            commandSequence: ++this.commandSequence, expectedPauseGeneration: session.pauseGeneration, action };
         if (!body) return;
         this.timers.clearTimeout(this.commandTimer);
         if (!retry) this.commandAttempts = 0;
