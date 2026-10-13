@@ -1,7 +1,10 @@
 package org.openintegrationengine.debugger.runtime;
 
 import com.mirth.connect.userutil.ImmutableConnectorMessage;
+import com.mirth.connect.userutil.ImmutableMessage;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mozilla.javascript.*;
 import org.mozilla.javascript.debug.*;
 
@@ -100,6 +103,33 @@ class DebugRuntimeTest {
         assertEquals(1, runtime.sources(CHANNEL).size());
         assertEquals(1, runtime.sources("unverified").size());
         assertTrue(runtime.sources("channel-b").isEmpty(), "Inconsistent scope/message identities cannot attribute a source to B");
+    }
+
+    @ParameterizedTest @ValueSource(booleans = {false, true})
+    void failingChannelGettersDoNotAbortIdleOrActiveExecution(boolean active) {
+        if (active) create(Map.of());
+        for (Throwable failure : List.of(new IllegalStateException("private"), new AssertionError("private"))) {
+            ImmutableConnectorMessage message = (ImmutableConnectorMessage) message(CHANNEL, 1, 0);
+            doAnswer(call -> { throw failure; }).when(message).getChannelId();
+            Script script = compile("function hot(){return 42;} hot();", "getter-" + failure.getClass().getSimpleName());
+            assertEquals(42.0, execute(script, CHANNEL, message));
+            assertTrue(runtime.sources(CHANNEL).isEmpty(), "A failed identity lookup cannot attribute the source to A");
+        }
+        assertEquals(2, runtime.sources("unverified").size());
+    }
+
+    @Test void idleGlobalMessageFallbackChecksTheCurrentChannel() {
+        ImmutableMessage message = mock(ImmutableMessage.class);
+        when(message.getChannelId()).thenReturn(CHANNEL);
+        factory.call(cx -> {
+            Scriptable scope = cx.initStandardObjects();
+            ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            ScriptableObject.putProperty(scope, "message", Context.javaToJS(message, scope));
+            assertEquals(42.0, cx.evaluateString(scope, "function hot(){return 42;} hot();", "message-fallback", 1, null));
+            return null;
+        });
+        assertEquals(1, runtime.sources(CHANNEL).size());
+        assertTrue(runtime.sources("global").isEmpty());
     }
 
     private void assertSharedSourceObserved() {

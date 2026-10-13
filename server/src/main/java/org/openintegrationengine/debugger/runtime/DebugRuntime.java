@@ -36,18 +36,6 @@ public final class DebugRuntime implements Debugger {
     private static final DebugRuntime INSTANCE = new DebugRuntime();
     private static final int MAX_SESSIONS = 32, MAX_PAUSES = 4;
     private static final long ARM_REQUEST_WINDOW_MILLIS = 30_000;
-    // Cache the immutable engine accessor, never scope or message identity values.
-    private static final ClassValue<java.lang.reflect.Method> MESSAGE_CHANNEL =
-            new ClassValue<>() {
-                @Override
-                protected java.lang.reflect.Method computeValue(Class<?> type) {
-                    try {
-                        return type.getMethod("getChannelId");
-                    } catch (NoSuchMethodException unavailable) {
-                        throw new IllegalStateException("Engine message channel accessor is unavailable", unavailable);
-                    }
-                }
-            };
     private final SourceRegistry registry = new SourceRegistry();
     private final ConcurrentMap<String, DebugSession> sessions = new ConcurrentHashMap<>();
     private final Set<DebugSession> activeSessions = ConcurrentHashMap.newKeySet();
@@ -632,7 +620,7 @@ public final class DebugRuntime implements Debugger {
         public void onEnter(Context context, Scriptable activation, Scriptable self, Object[] args) {
             if (!enabled || !source.valid) return;
             try {
-                String channel = identify(activation, false).channel;
+                String channel = observedChannel(activation);
                 if (!observedChannels.contains(channel)) {
                     registry.observe(source, channel);
                     observedChannels.add(channel);
@@ -677,7 +665,7 @@ public final class DebugRuntime implements Debugger {
             try {
                 this.scope = activation;
                 this.thisObject = thisObject;
-                identity = identify(activation, true);
+                identity = identify(activation);
                 execution.frames.add(this);
                 registry.observe(source, identity.channel);
                 if (execution.frames.size() > 1) {
@@ -1134,33 +1122,61 @@ public final class DebugRuntime implements Debugger {
                 && (session.includeLifecycle || identity.messageId != null);
     }
 
-    private Identity identify(Scriptable scope, boolean includeMessage) {
-        Scriptable top = ScriptableObject.getTopLevelScope(scope);
+    private static String scopeChannel(Scriptable top) {
         Object channelValue = SafeInspector.unwrap(SafeInspector.ownData(top, "channelId"));
-        String channel = channelValue instanceof String text && !text.isBlank() ? text : "global";
-        String message = null, connector = null;
-        Integer sendAttempts = null;
+        return channelValue instanceof String text && !text.isBlank() ? text : "global";
+    }
+
+    private static Object scopeMessage(Scriptable top) {
         Object raw = SafeInspector.unwrap(SafeInspector.ownData(top, "connectorMessage"));
         if (!trustedMessage(raw)) raw = SafeInspector.unwrap(SafeInspector.ownData(top, "message"));
-        if (trustedMessage(raw)) {
+        return trustedMessage(raw) ? raw : null;
+    }
+
+    private static String verifiedChannel(String channel, Object message)
+            throws java.lang.reflect.InvocationTargetException {
+        if (message == null) return channel;
+        try {
+            // scopeMessage accepts only these exact engine classes, never user subclasses.
+            String actualChannel = message instanceof ImmutableConnectorMessage connector
+                    ? connector.getChannelId() : ((ImmutableMessage) message).getChannelId();
+            return actualChannel == null || channel.equals(actualChannel) ? channel : "unverified";
+        } catch (Throwable failure) {
+            // Preserve the old reflective call's failure behavior for engine getters.
+            throw new java.lang.reflect.InvocationTargetException(failure);
+        }
+    }
+
+    private static String observedChannel(Scriptable scope) {
+        Scriptable top = ScriptableObject.getTopLevelScope(scope);
+        String channel = scopeChannel(top);
+        try {
+            return verifiedChannel(channel, scopeMessage(top));
+        } catch (ReflectiveOperationException unavailable) {
+            return "unverified";
+        }
+    }
+
+    private Identity identify(Scriptable scope) {
+        Scriptable top = ScriptableObject.getTopLevelScope(scope);
+        String channel = scopeChannel(top);
+        String message = null, connector = null;
+        Integer sendAttempts = null;
+        Object raw = scopeMessage(top);
+        if (raw != null) {
             try {
-                Object actualChannel = MESSAGE_CHANNEL.get(raw.getClass()).invoke(raw);
                 // Scope and trusted message must agree; inconsistent identities never match a user
                 // channel.
-                if (actualChannel instanceof String text && !channel.equals(text))
-                    channel = "unverified";
-                // Idle source attribution needs the channel consistency check only.
-                if (includeMessage) {
-                    Object actualMessage = raw.getClass().getMethod("getMessageId").invoke(raw);
-                    if (actualMessage instanceof Number number)
-                        message = Long.toString(number.longValue());
-                    if (raw.getClass().getName().endsWith("ImmutableConnectorMessage")) {
-                        Object actualConnector = raw.getClass().getMethod("getMetaDataId").invoke(raw);
-                        if (actualConnector instanceof Number number)
-                            connector = Integer.toString(number.intValue());
-                        Object attempts = raw.getClass().getMethod("getSendAttempts").invoke(raw);
-                        if (attempts instanceof Number number) sendAttempts = number.intValue();
-                    }
+                channel = verifiedChannel(channel, raw);
+                Object actualMessage = raw.getClass().getMethod("getMessageId").invoke(raw);
+                if (actualMessage instanceof Number number)
+                    message = Long.toString(number.longValue());
+                if (raw.getClass().getName().endsWith("ImmutableConnectorMessage")) {
+                    Object actualConnector = raw.getClass().getMethod("getMetaDataId").invoke(raw);
+                    if (actualConnector instanceof Number number)
+                        connector = Integer.toString(number.intValue());
+                    Object attempts = raw.getClass().getMethod("getSendAttempts").invoke(raw);
+                    if (attempts instanceof Number number) sendAttempts = number.intValue();
                 }
             } catch (ReflectiveOperationException ignored) {
                 channel = "unverified";
