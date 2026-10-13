@@ -1,77 +1,53 @@
 # OIE JavaScript Debugger
 
-Debug JavaScript running in Open Integration Engine channels from Web Administrator.
+Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
-## Features
+![A sample order paused in the debugger, with its deployed script, variables, and call stack visible](docs/images/debugger-paused.png)
 
-- Pause at breakpoints, script entry, or exceptions.
-- Continue execution or step into, over, and out of functions.
-- Inspect deployed scripts, the call stack, variables, message content, and maps.
-- Use watch expressions, conditional breakpoints, and variable editing with evaluation enabled.
-- Send a message in the format expected by the selected channel.
-- Limit debugging to a channel, message, connector, or script.
+## What you can do
 
-## Installation
+- Pause at script entry, a breakpoint, a JavaScript `debugger` statement, or an exception.
+- Step into, over, and out of JavaScript functions.
+- Set a breakpoint at a named script step and continue toward it with **Run to selected step**.
+- Read the deployed script and choose a frame in the call stack.
+- Inspect variables, message content, XML, and maps.
+- Add watches, evaluate expressions, edit variable values, and set conditional breakpoints with evaluation enabled.
+- Send a test message through a channel and its enabled destinations.
+- Choose a channel, message ID, connector, script kind, or exact deployed source to focus the session.
+- Debug global and lifecycle scripts with the appropriate access and session setting.
 
-Requires Java 17+, OIE 4.6.0, and Web Administrator plugin API 4.7 or newer. Plugin discovery requires native web-support endpoints or the Web Support extension.
+## Install
 
-1. Download the plugin ZIP from [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases).
-2. Install it through the engine's extension installer.
-3. Restart the engine.
-4. Reload Web Administrator and open **Monitor → Debugger**.
+Use Java 17 or newer, **OIE 4.6.0**, and **Web Administrator with plugin API 4.7 or newer**. Web Administrator 1.0.1 provides this API. The engine also needs web-support endpoints, supplied by the [Web Support extension](https://github.com/gibson9583/oie-web-support-plugin).
 
-The debugger requires `rhino.optimizationlevel=-1`, which is OIE's default when the property is absent. If `conf/mirth.properties` explicitly sets a different value, change it to `-1` before restarting. Otherwise, no configuration change is needed.
+1. Download [oie-debugger-1.0.0.zip](https://github.com/gibson9583/oie-debugger/releases/download/v1.0.0/oie-debugger-1.0.0.zip) from the [signed 1.0.0 release](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.0).
+2. Install the ZIP through the engine's extension installer.
+3. Restart the engine, then reload Web Administrator.
+4. Open **Monitor → Debugger**.
 
-Redeploy channels that were compiled while the debugger was disabled so their scripts become available.
+The engine's JavaScript setting is `rhino.optimizationlevel=-1`. This is the default when the property is absent from `conf/mirth.properties`. If the property is already present, set its value to `-1` before restarting.
 
-## Debug a message
+Deploy your test channel with the debugger enabled so its scripts are available. After enabling the debugger for an already running engine, redeploy the channels you want to inspect.
 
-1. Select a channel. Leave **Message ID** empty to send a new message.
-2. Select **Break on entry** and click **Arm debugger**.
-3. Enter your message under **Send a message**, then click **Send message**. The message runs through the selected channel and all enabled destinations.
-4. When execution pauses, inspect **Variables and maps** and use the controls below.
-5. Choose **End session** when finished. End or clear the session before changing its settings.
+## Debug your first message
 
-| Control | Action |
-| --- | --- |
-| Continue | Run until the next stop or the script finishes. |
-| Step over | Advance to the next executable line in the current function, running called functions along the way. |
-| Step into | Advance to the next executable line, entering a called JavaScript function when possible. |
-| Step out | Run until the current function returns. |
-| Pause next line | Request a pause at the next executable line. |
-| Run to selected step | Set a breakpoint at the selected script step and continue toward it. Earlier breakpoints or control flow may stop execution elsewhere. |
+1. Open **Monitor → Debugger** and select a test channel.
+2. Leave **Message ID** empty for a new message. Select **Break on entry**, then click **Arm debugger**.
+3. Under **Send a message**, paste a sample in the format your channel expects and click **Send message**.
+4. At the pause, read **Variables and maps** and **Call stack**. If the source has a **Script step** list, select your step and click **Run to selected step**.
+5. Use **Step over** to advance through your code, or **Continue** to run to the next stop.
+6. Click **End session** when finished. The paused execution resumes.
 
-Breakpoints and exceptions can interrupt stepping. **Break on entry** can pause separately in source and destination scripts, even without breakpoints. **Armed** means the debugger is waiting for another matching script; it does not confirm that the entire message has finished.
+Keep the Debugger screen open during the session. Each session follows one execution at a time. **Armed** means the debugger is waiting for a matching script, and **paused** means you can inspect the current execution. **Break on entry** can pause at both source and destination scripts.
 
-Stay on the Debugger screen while debugging; leaving it ends the session. A session debugs one execution at a time, so concurrent messages may run without pausing. The displayed source is read-only and comes from the deployed channel.
+Choose **Enable evaluation and value editing** before arming to use watches, conditional breakpoints, expression evaluation, and value editing. Expressions run JavaScript with the engine's permissions.
 
-If the Arm response is interrupted, choose **Check arm result** to recover the original session. Its settings stay locked until the outcome is known. If that session has ended, choose **Clear session** before arming again.
+Set **Maximum pause (seconds)** to choose a pause duration from 1 to 120 seconds. The engine resumes processing when that time is reached. It also releases the execution when a disconnected session expires.
 
-Selecting an existing **Message ID** does not send or reprocess that message. Choose **Arm for a new message** to remove that filter before sending a new message.
+## Learn more
 
-## Access and settings
+The [usage wiki](https://github.com/gibson9583/oie-debugger/wiki) includes installation, a sample channel, sending messages, breakpoints, stepping, inspecting values, permissions, and session recovery. You can also read the [guide in this repository](docs/wiki/Home.md).
 
-Users need **View JavaScript Debugger** to inspect scripts, **Control JavaScript Debugger** to control execution, and **Evaluate JavaScript Debugger** for expression features. Sending requires **Send Message** permission. Existing channel permissions also apply.
-
-The **JavaScript Debugger** extension properties provide additional restrictions:
-
-| Property | Setting |
-| --- | --- |
-| `enabled` | Set to `false` to disable debugger access. |
-| `evaluationEnabled` | Set to `false` to disable watches, conditional expressions, evaluation, and value editing. |
-| `allowedUserIds` | Comma-separated numeric engine user IDs allowed to use the debugger. |
-| `allowedChannelIds` | Comma-separated channel IDs, or `*` for no additional channel restriction. |
-| `evaluationUserIds` | Additional user restriction for expression features. |
-| `globalUserIds` | Additional user restriction for global and lifecycle scripts. |
-
-Blank lists add no restriction. Nonempty lists also restrict administrators and do not grant engine permissions. User lists do not support wildcards. Global and lifecycle debugging requires unrestricted channel access, control permission, and session opt-in. Evaluation must also be enabled for the session. Changing access settings closes existing sessions.
-
-## Limits
-
-Use development or test traffic. Pausing can hold transactions and cause upstream timeouts or retries. Pauses last at most 120 seconds; a lost connection also releases paused execution after the session expires.
-
-Watches, conditions, and value edits run JavaScript with engine privileges and may change data or call external systems. Blocking Java calls and scripts without debugger callbacks cannot always be interrupted. The debugger cannot undo processing, reverse execution, or step through Java code. Shared maps may change while another worker runs.
-
-Automatic previews inspect supported maps without running getters or custom map methods. OIE's read-only `sourceMap` and other unrecognized map wrappers remain opaque. With evaluation enabled, use **Evaluate** to read an individual value, for example `sourceMap.get("key")`. Evaluation explicitly runs script code and is subject to the permissions above.
+Users need **View JavaScript Debugger** to read sources, **Control JavaScript Debugger** to run a session, **Evaluate JavaScript Debugger** to use expression features, and **Send Message** to send a sample. Channel permissions and the debugger's extension properties let administrators choose who can debug each channel. See [Access and settings](https://github.com/gibson9583/oie-debugger/wiki/Access-and-settings) for setup steps.
 
 Licensed under the [Mozilla Public License 2.0](LICENSE).
