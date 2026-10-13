@@ -15,7 +15,7 @@ public final class AccessPolicy {
     public final boolean evaluationEnabled;
 
     public AccessPolicy(Properties properties) {
-        enabled = Boolean.parseBoolean(properties.getProperty("enabled", "true"));
+        enabled = Boolean.parseBoolean(properties.getProperty("enabled", "false"));
         evaluationEnabled = Boolean.parseBoolean(properties.getProperty("evaluationEnabled", "true"));
         users = values(properties, "allowedUserIds");
         evaluators = values(properties, "evaluationUserIds");

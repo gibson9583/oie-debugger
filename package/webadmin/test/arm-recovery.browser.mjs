@@ -24,7 +24,7 @@ const api={
         calls.push(['GET',path,params]);
         if(path.endsWith('/capabilities')){
             capabilities++;
-            return JSON.stringify({available:true,apiVersion:1,controlAllowed:true,
+            return JSON.stringify({available:true,apiVersion: 1, commandProtocol: 2,controlAllowed:true,
                 evaluationAllowed:mode==='watches'||mode==='command-retry'||mode==='revoke-engine'||(['revoke-evaluation','lost-denied'].includes(mode)&&capabilities===1),
                 evaluationEnabled:mode!=='revoke-engine'||capabilities===1,
                 globalAllowed:mode==='revoke-global'&&capabilities===1,armRequestExpiresAt:Date.now()+60000+capabilities});

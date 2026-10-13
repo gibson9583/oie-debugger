@@ -58,19 +58,19 @@ class DebuggerServletTest {
         when(httpSession.getAttribute("authorized")).thenReturn(true); when(httpSession.getAttribute("user")).thenReturn(7);
         when(httpSession.getId()).thenReturn("browser-session");
         when(request.getRemoteAddr()).thenReturn("127.0.0.1");
-        policy = new Properties(); applyPolicy();
+        policy = enabledProperties(); applyPolicy();
         id = createSession("channel-a", Map.of("tabId", TAB, "evaluationEnabled", true));
     }
 
     @AfterEach void cleanup() {
-        runtime.shutdown(); new DebuggerPlugin().init(new Properties()); DebugRuntime.getInstance().configure(false, false);
+        runtime.shutdown(); new DebuggerPlugin().init(enabledProperties()); DebugRuntime.getInstance().configure(false, false);
     }
 
     @ParameterizedTest @ValueSource(strings = {"allowedUserIds", "allowedChannelIds", "evaluationEnabled", "enabled"})
     void policyUpdateClosesAnArmAlreadyPastItsAuthorizationCheck(String restriction) throws Exception {
         DebuggerPlugin plugin = new DebuggerPlugin();
         DebugRuntime runtime = DebugRuntime.getInstance();
-        plugin.init(new Properties());
+        plugin.init(enabledProperties());
         var workers = Executors.newFixedThreadPool(2);
         var validated = new CountDownLatch(1);
         var finishValidation = new CountDownLatch(1);
@@ -88,7 +88,7 @@ class DebuggerServletTest {
                     () -> { validated.countDown(); try { assertTrue(finishValidation.await(3, TimeUnit.SECONDS)); }
                         catch (InterruptedException e) { throw new RuntimeException(e); } }));
             assertTrue(validated.await(3, TimeUnit.SECONDS));
-            Properties revoked = new Properties();
+            Properties revoked = enabledProperties();
             revoked.setProperty(restriction, restriction.equals("allowedUserIds") ? "8"
                     : restriction.equals("allowedChannelIds") ? "another-channel" : "false");
             var updating = workers.submit(() -> plugin.update(revoked));
@@ -107,7 +107,7 @@ class DebuggerServletTest {
             runtime.shutdown();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS));
-            plugin.init(new Properties());
+            plugin.init(enabledProperties());
             runtime.shutdown();
         }
     }
@@ -115,10 +115,10 @@ class DebuggerServletTest {
     @Test void overlappingPolicyUpdatesPublishInTheSameOrderAsRuntimeConfiguration() throws Exception {
         DebuggerPlugin plugin = new DebuggerPlugin();
         DebugRuntime runtime = DebugRuntime.getInstance();
-        plugin.init(new Properties());
+        plugin.init(enabledProperties());
         ExecutorService workers = Executors.newFixedThreadPool(2);
-        Properties first = new Properties(); first.setProperty("enabled", "false");
-        Properties second = new Properties(); second.setProperty("evaluationEnabled", "false");
+        Properties first = enabledProperties(); first.setProperty("enabled", "false");
+        Properties second = enabledProperties(); second.setProperty("evaluationEnabled", "false");
         AtomicReference<Thread> secondThread = new AtomicReference<>();
         CountDownLatch secondStarted = new CountDownLatch(1);
         try {
@@ -145,15 +145,26 @@ class DebuggerServletTest {
             assertEquals(DebuggerPlugin.policy().evaluationEnabled, runtime.status().get("evaluationEnabled"));
         } finally {
             workers.shutdownNow(); assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS));
-            plugin.init(new Properties()); runtime.shutdown();
+            plugin.init(enabledProperties()); runtime.shutdown();
         }
     }
+
+    private static Properties enabledProperties() {
+        Properties properties = new Properties();
+        properties.setProperty("enabled", "true");
+        return properties;
+    }
+
+    private static final java.util.concurrent.atomic.AtomicLong SEQUENCES = new java.util.concurrent.atomic.AtomicLong(100);
 
     private void applyPolicy() { new DebuggerPlugin().init(policy); }
     private String createSession(String channel, Map<String,Object> options) { return runtime.create(OWNER, channel, options).get("id").toString(); }
     private DebuggerServlet servlet(String operation) {
         DebuggerServlet servlet = new DebuggerServlet(request, null, controllers, runtime);
-        servlet.setOperation(new Operation(operation, operation, Operation.ExecuteType.ASYNC, false));
+        var metadata = java.util.Arrays.stream(DebuggerServletInterface.class.getDeclaredMethods())
+                .map(method -> method.getAnnotation(com.mirth.connect.client.core.api.MirthOperation.class))
+                .filter(annotation -> annotation != null && annotation.name().equals(operation)).findFirst().orElseThrow();
+        servlet.setOperation(new Operation(operation, operation, Operation.ExecuteType.ASYNC, metadata.auditable()));
         return servlet;
     }
     private void denyOperations(String... names) throws Exception {
@@ -195,7 +206,7 @@ class DebuggerServletTest {
             case "debuggerSession" -> api.session(sessionId, TAB);
             case "debuggerHeartbeat" -> api.heartbeat(sessionId, "{\"tabId\":\"tab-a\"}");
             case "debuggerClose" -> api.close(sessionId, TAB);
-            case "debuggerCommand" -> api.command(sessionId, "{\"tabId\":\"tab-a\",\"commandId\":\"command-a\",\"expectedPauseGeneration\":0,\"action\":\"pause\"}");
+            case "debuggerCommand" -> api.command(sessionId, "{\"tabId\":\"tab-a\",\"commandId\":\"command-a\",\"commandSequence\":1,\"expectedPauseGeneration\":0,\"action\":\"pause\"}");
             case "debuggerBreakpoints" -> api.breakpoints(sessionId, "{\"tabId\":\"tab-a\",\"sourceId\":\"unknown-source\",\"lines\":[]}");
             default -> throw new IllegalArgumentException(operation);
         };
@@ -314,7 +325,9 @@ class DebuggerServletTest {
                 plugin.when(DebuggerPlugin::unavailableReason).thenReturn("Debugger unavailable"); status = 409;
             } else denyOperations(failure);
             rejectedArm(servlet("debuggerCreate").create(Json.write(options)), status, options.get("requestId"));
-            verify(authorization, atLeastOnce()).isUserAuthorized(eq(7), any(), anyMap(), any(), eq(true));
+            verify(authorization, atLeastOnce()).isUserAuthorized(eq(7), any(), anyMap(), any(), eq(false));
+            verify(authorization).auditAuthorizationRequest(eq(7), any(), anyMap(),
+                    eq(com.mirth.connect.model.ServerEvent.Outcome.FAILURE), any());
             assertArmed(id); assertEquals(1L, runtime.status().get("activeSessions"));
         }
     }
@@ -578,7 +591,7 @@ class DebuggerServletTest {
         try (PausedScript paused = new PausedScript(true)) {
             Map<String,Object> source = runtime.source(paused.sourceId);
             Map<String,Object> update = new java.util.LinkedHashMap<>(Map.of("tabId", TAB,
-                    "commandId", UUID.randomUUID().toString(), "action", "setBreakpoints",
+                    "commandId", UUID.randomUUID().toString(), "commandSequence", SEQUENCES.incrementAndGet(), "action", "setBreakpoints",
                     "expectedPauseGeneration", paused.snapshot.get("pauseGeneration"), "sourceId", paused.sourceId,
                     "sourceHash", source.get("hash"), "sourceGeneration", source.get("generation"), "lines", List.of()));
             Map<String,Object> receipt = body(servlet("debuggerCommand").command(paused.sessionId, Json.write(update)));
@@ -586,7 +599,7 @@ class DebuggerServletTest {
             assertEquals(paused.sourceId, ((Map<?,?>)receipt.get("result")).get("sourceId"));
             assertEquals(receipt, body(servlet("debuggerCommand").command(paused.sessionId, Json.write(update))));
             Map<String,Object> original = Map.copyOf(update);
-            update.put("commandId", UUID.randomUUID().toString());
+            update.put("commandId", UUID.randomUUID().toString()); update.put("commandSequence", SEQUENCES.incrementAndGet());
             Map<String,Object> legacy = Map.copyOf(update);
             Map<String,Object> legacyReceipt = body(servlet("debuggerBreakpoints").breakpoints(paused.sessionId, Json.write(legacy)));
             assertEquals("completed", legacyReceipt.get("status"));
@@ -594,7 +607,7 @@ class DebuggerServletTest {
             assertEquals(receipt, body(servlet("debuggerCommand").command(paused.sessionId, Json.write(original))),
                     "A lost applied response remains reconcilable after the dynamic frame resumes");
             assertEquals(legacyReceipt, body(servlet("debuggerBreakpoints").breakpoints(paused.sessionId, Json.write(legacy))));
-            update.put("commandId", UUID.randomUUID().toString());
+            update.put("commandId", UUID.randomUUID().toString()); update.put("commandSequence", SEQUENCES.incrementAndGet());
             assertEquals(409, servlet("debuggerCommand").command(paused.sessionId, Json.write(update)).getStatus());
             assertEquals(409, servlet("debuggerBreakpoints").breakpoints(paused.sessionId, Json.write(update)).getStatus());
         }
@@ -606,7 +619,7 @@ class DebuggerServletTest {
             assertEquals(200, servlet("debuggerSource").source(paused.sourceId, "channel-a", null, null).getStatus());
             Map<String,Object> source = runtime.source(paused.sourceId);
             Map<String,Object> update = new java.util.LinkedHashMap<>(Map.of("tabId", TAB,
-                    "commandId", UUID.randomUUID().toString(), "action", "setBreakpoints",
+                    "commandId", UUID.randomUUID().toString(), "commandSequence", SEQUENCES.incrementAndGet(), "action", "setBreakpoints",
                     "expectedPauseGeneration", paused.snapshot.get("pauseGeneration"), "sourceId", paused.sourceId,
                     "sourceHash", source.get("hash"), "sourceGeneration", source.get("generation"), "lines", List.of()));
             Map<String,Object> applied = body(servlet("debuggerCommand").command(paused.sessionId, Json.write(update)));
@@ -615,7 +628,7 @@ class DebuggerServletTest {
             assertEquals(409, servlet("debuggerSource").source(paused.sourceId, "channel-a", paused.sessionId, TAB).getStatus());
             assertEquals(applied, body(servlet("debuggerCommand").command(paused.sessionId, Json.write(update))),
                     "An applied receipt survives replacement of the source it modified");
-            update.put("commandId", UUID.randomUUID().toString());
+            update.put("commandId", UUID.randomUUID().toString()); update.put("commandSequence", SEQUENCES.incrementAndGet());
             assertEquals(409, servlet("debuggerCommand").command(paused.sessionId, Json.write(update)).getStatus());
             CompiledScriptCache.getInstance().removeCompiledScript(paused.sourceName);
             assertEquals(409, servlet("debuggerSource").source(paused.sourceId, "channel-a", paused.sessionId, TAB).getStatus());
@@ -667,7 +680,7 @@ class DebuggerServletTest {
         }
 
         void resume() throws Exception {
-            runtime.command(OWNER, sessionId, Map.of("tabId", TAB, "commandId", UUID.randomUUID().toString(),
+            runtime.command(OWNER, sessionId, Map.of("tabId", TAB, "commandId", UUID.randomUUID().toString(), "commandSequence", SEQUENCES.incrementAndGet(),
                     "action", "continue", "expectedPauseGeneration", snapshot.get("pauseGeneration")));
             result.get(2, TimeUnit.SECONDS);
         }
@@ -678,6 +691,57 @@ class DebuggerServletTest {
             assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS), "Owned script worker must exit");
             CompiledScriptCache.getInstance().removeCompiledScript(sourceName);
         }
+    }
+
+    @Test void commandAndReceiptRetryAuditOnceEachWithActionAndWithoutPayload() throws Exception {
+        List<Map<String, Object>> events = new java.util.ArrayList<>();
+        doAnswer(invocation -> {
+            events.add(new java.util.LinkedHashMap<>(invocation.getArgument(2)));
+            assertEquals(com.mirth.connect.model.ServerEvent.Outcome.SUCCESS, invocation.getArgument(3));
+            return null;
+        }).when(authorization).auditAuthorizationRequest(anyInt(), any(), anyMap(), any(), any());
+        String body = "{\"tabId\":\"tab-a\",\"commandId\":\"audit-command\",\"commandSequence\":1,"
+                + "\"expectedPauseGeneration\":0,\"action\":\"pause\",\"expression\":\"PRIVATE MESSAGE\"}";
+        assertEquals(200, servlet("debuggerCommand").command(id, body).getStatus());
+        assertEquals(200, servlet("debuggerCommand").command(id, body).getStatus());
+        assertEquals(2, events.size());
+        for (Map<String, Object> event : events) {
+            assertEquals("pause", event.get("action"));
+            assertEquals(id, event.get("debugSessionId"));
+            assertEquals("channel-a", event.get("channelId"));
+            assertFalse(event.toString().contains("PRIVATE"));
+            assertFalse(event.containsKey("tabId"));
+            assertFalse(event.containsKey("body"));
+        }
+        verify(authorization, never()).isUserAuthorized(anyInt(), any(), anyMap(), any(), eq(true));
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"continue", "inspect", "evaluate", "setValue", "setWatches", "stepOver", "PRIVATE UNKNOWN ACTION"})
+    void failedCommandsAuditTheirAllowlistedActionOnce(String action) throws Exception {
+        String body = Json.write(Map.of("tabId", TAB, "commandId", "invalid", "commandSequence", 1,
+                "expectedPauseGeneration", 0, "action", action, "expressions", List.of(7)));
+        assertTrue(servlet("debuggerCommand").command(id, body).getStatus() >= 400);
+        verify(authorization).auditAuthorizationRequest(eq(7), any(), argThat(parameters ->
+                (DebugRuntime.ACTIONS.contains(action) ? action : "invalid").equals(parameters.get("action"))
+                && !parameters.toString().contains("PRIVATE")), eq(com.mirth.connect.model.ServerEvent.Outcome.FAILURE), any());
+    }
+
+    @Test void policyDenialAuditsFailureOnceAndClosesOnlyTheOwnedSession() throws Exception {
+        policy.setProperty("allowedUserIds", "8"); applyPolicy();
+        assertEquals(403, servlet("debuggerCommand").command(id, Json.write(Map.of("tabId", TAB,
+                "commandId", "denied", "commandSequence", 1, "expectedPauseGeneration", 0, "action", "pause"))).getStatus());
+        verify(authorization).auditAuthorizationRequest(eq(7), any(), anyMap(),
+                eq(com.mirth.connect.model.ServerEvent.Outcome.FAILURE), any());
+        assertClosed(id);
+    }
+
+    @Test void globalCommandsHaveAnExplicitGlobalAuditTarget() throws Exception {
+        String global = createSession("global", Map.of("tabId", TAB, "includeGlobal", true));
+        assertEquals(200, servlet("debuggerCommand").command(global, Json.write(Map.of("tabId", TAB,
+                "commandId", "global-command", "commandSequence", 1, "expectedPauseGeneration", 0, "action", "pause"))).getStatus());
+        verify(authorization).auditAuthorizationRequest(eq(7), any(), argThat(parameters ->
+                "global".equals(parameters.get("channelId")) && "pause".equals(parameters.get("action"))),
+                eq(com.mirth.connect.model.ServerEvent.Outcome.SUCCESS), any());
     }
 
     @Test void engineInvocationAuditsExcludeBodiesAndTabTokens() {

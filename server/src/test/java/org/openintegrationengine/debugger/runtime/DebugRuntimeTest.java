@@ -14,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class DebugRuntimeTest {
+    private static final java.util.concurrent.atomic.AtomicLong SEQUENCES = new java.util.concurrent.atomic.AtomicLong();
     private DebugRuntime runtime;
     private ContextFactory factory;
     private ExecutorService workers;
@@ -28,6 +29,143 @@ class DebugRuntimeTest {
     }
     @AfterEach void cleanup() throws Exception {
         runtime.shutdown(); workers.shutdownNow(); assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS), "Owned script workers must exit");
+    }
+
+    @Test void idleNestedCallsHaveNoFramesAndDoNotWaitForTheRegistryMonitor() throws Exception {
+        String closedId = create(Map.of());
+        runtime.close(OWNER, closedId, TAB);
+        var warmed = new CountDownLatch(1);
+        var proceed = new CountDownLatch(1);
+        AtomicInteger frames = new AtomicInteger();
+        var field = DebugRuntime.class.getDeclaredField("registry"); field.setAccessible(true);
+        Object registry = field.get(runtime);
+        Future<Object> result = workers.submit(() -> factory.call(cx -> {
+            Debugger original = cx.getDebugger();
+            cx.setDebugger(new Debugger() {
+                int callbacks;
+                public void handleCompilationDone(Context context, DebuggableScript script, String text) {
+                    original.handleCompilationDone(context, script, text);
+                }
+                public DebugFrame getFrame(Context context, DebuggableScript script) {
+                    if (++callbacks == 10) { warmed.countDown(); awaitLatch(proceed); }
+                    DebugFrame frame = original.getFrame(context, script);
+                    if (frame != null) frames.incrementAndGet();
+                    return frame;
+                }
+            }, cx.getDebuggerContextData());
+            var scope = cx.initStandardObjects();
+            ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            return cx.evaluateString(scope, "function hot(){return 1;} var n=0; for(var i=0;i<10000;i++) n+=hot(); n;", "idle", 1, null);
+        }));
+        try {
+            assertTrue(warmed.await(3, TimeUnit.SECONDS));
+            synchronized (registry) {
+                proceed.countDown();
+                assertEquals(10000.0, result.get(3, TimeUnit.SECONDS));
+            }
+            assertEquals(1, frames.get(), "Only the enclosing source-observation frame is necessary");
+            assertEquals(1, runtime.sources(CHANNEL).size());
+        } finally { proceed.countDown(); }
+    }
+
+    @Test void moreThan256CommandsCanContinueAndEvictedMutationCannotReplay() throws Exception {
+        String id = create(Map.of("evaluationEnabled", true));
+        Future<Object> result = run(compile("var n=1;\nn;", "long-session"), CHANNEL);
+        Map<String, Object> paused = awaitPause(id, 1);
+        Map<String, Object> first = command(paused, "setWatches", Map.of("expressions", List.of("1")));
+        runtime.command(OWNER, id, first);
+        for (int i = 0; i < 1000; i++) runtime.command(OWNER, id,
+                command(paused, "setWatches", Map.of("expressions", List.of())));
+        assertThrows(IllegalStateException.class, () -> runtime.command(OWNER, id, first));
+        receipt(id, command(paused, "continue", Map.of()));
+        assertEquals(1.0, result.get(3, TimeUnit.SECONDS));
+    }
+
+    @Test void invalidFrameAndValueEditsDoNotPreventAValidContinue() throws Exception {
+        String id = create(Map.of("evaluationEnabled", true));
+        Future<Object> result = run(compile("var n=1;\nn;", "invalid-commands"), CHANNEL);
+        Map<String, Object> paused = awaitPause(id, 1);
+        for (Object index : List.of(-1, 1, 64, 0.5, "0"))
+            assertNotNull(receipt(id, command(paused, "inspect", Map.of("frameIndex", index))).get("error"));
+        for (String name : List.of("n.x", "notLocal"))
+            assertNotNull(receipt(id, command(paused, "setValue", Map.of("name", name, "valueExpression", "9"))).get("error"));
+        receipt(id, command(paused, "continue", Map.of()));
+        assertEquals(1.0, result.get(3, TimeUnit.SECONDS));
+    }
+
+    @Test void queueCapacityRejectsOverflowAndCloseReleasesQueuedCommands() throws Exception {
+        String id = create(Map.of());
+        Future<Object> result = run(compile("1;", "queue"), CHANNEL);
+        Map<String, Object> paused = awaitPause(id, 1);
+        List<Map<String, Object>> requests = new ArrayList<>();
+        synchronized (storedSession(id)) {
+            for (int i = 0; i < 16; i++) {
+                Map<String, Object> request = command(paused, "inspect", Map.of());
+                requests.add(request);
+                assertEquals("pending", runtime.command(OWNER, id, request).get("status"));
+            }
+            assertEquals("Command queue is full", assertThrows(IllegalStateException.class,
+                    () -> runtime.command(OWNER, id, command(paused, "inspect", Map.of()))).getMessage());
+            runtime.close(OWNER, id, TAB);
+        }
+        assertEquals(1.0, result.get(3, TimeUnit.SECONDS));
+        for (Map<String, Object> request : requests)
+            assertEquals("Pause ended before command executed", runtime.command(OWNER, id, request).get("error"));
+    }
+
+    @Test void unknownActionsAndInvalidWatchesAreRejectedWithoutChangingState() throws Exception {
+        String id = create(Map.of("evaluationEnabled", true, "watches", List.of("1")));
+        Map<String, Object> state = runtime.session(OWNER, id, TAB);
+        assertEquals("Unknown debugger action", assertThrows(IllegalArgumentException.class,
+                () -> runtime.command(OWNER, id, command(state, "unknown", Map.of()))).getMessage());
+        for (Object invalid : List.of("text", Collections.nCopies(17, "1"), List.of(1), List.of(""))) {
+            assertThrows(IllegalArgumentException.class, () -> runtime.command(OWNER, id,
+                    command(state, "setWatches", Map.of("expressions", invalid))));
+            assertThrows(IllegalArgumentException.class, () -> create(Map.of("evaluationEnabled", true, "watches", invalid)));
+        }
+        assertEquals("armed", runtime.session(OWNER, id, TAB).get("status"));
+        assertEquals(List.of("1"), ((DebugSession) storedSession(id)).watches);
+    }
+
+    @Test void malformedBreakpointBatchesAreAtomicAndStrictlyValidated() throws Exception {
+        Script script = compile("var n=1;\nn;", "breakpoint-inputs");
+        run(script, CHANNEL).get(3, TimeUnit.SECONDS);
+        Map<String, Object> source = runtime.sources(CHANNEL).get(0);
+        String id = create(Map.of("breakOnEntry", false));
+        Map<String, Object> fields = new HashMap<>(Map.of("sourceId", source.get("id"), "sourceHash", source.get("hash"),
+                "sourceGeneration", source.get("generation"), "lines", List.of(1)));
+        setBreakpoints(id, fields);
+        for (Object invalid : List.of("text", Collections.nCopies(257, 1), Arrays.asList((Object) null), List.of("1"),
+                List.of(1.5), List.of(999), List.of(Map.of("line", 1, "hitCount", 0)),
+                List.of(Map.of("line", 1, "hitCount", 1_000_001)), List.of(Map.of("line", 1, "hitCount", 1.5)))) {
+            fields.put("lines", invalid);
+            assertThrows(IllegalArgumentException.class, () -> setBreakpoints(id, fields));
+        }
+        fields.put("lines", List.of(Map.of("line", 1, "condition", "true")));
+        assertThrows(SecurityException.class, () -> setBreakpoints(id, fields));
+        Future<Object> result = run(script, CHANNEL);
+        Map<String, Object> paused = awaitPause(id, 1);
+        assertEquals("breakpoint", paused.get("reason"), "Invalid batches must preserve the original breakpoint");
+        receipt(id, command(paused, "continue", Map.of()));
+        assertEquals(1.0, result.get(3, TimeUnit.SECONDS));
+    }
+
+    @Test void breakpointSourceLimitStillAllowsUpdatingAnExistingSource() throws Exception {
+        String id = create(Map.of("breakOnEntry", false));
+        Map<String, Object> first = null;
+        for (int index = 0; index <= 32; index++) {
+            String name = "breakpoint-source-" + index;
+            run(compile("1;", name), CHANNEL).get(3, TimeUnit.SECONDS);
+            Map<String, Object> source = runtime.sources(CHANNEL).stream()
+                    .filter(candidate -> name.equals(candidate.get("name"))).findFirst().orElseThrow();
+            Map<String, Object> fields = Map.of("sourceId", source.get("id"), "sourceHash", source.get("hash"),
+                    "sourceGeneration", source.get("generation"), "lines", List.of(1));
+            if (index == 0) first = fields;
+            if (index < 32) setBreakpoints(id, fields);
+            else assertEquals("Breakpoint source limit reached", assertThrows(IllegalStateException.class,
+                    () -> setBreakpoints(id, fields)).getMessage());
+        }
+        assertEquals(1, setBreakpoints(id, first).get("result") instanceof Map<?, ?> result ? result.get("count") : null);
     }
 
     @Test void entryInspectStepAndContinuePreserveScriptResultAndExactSource() throws Exception {
@@ -608,7 +746,7 @@ class DebugRuntimeTest {
 
     @Test void nullableOptionalCommandFieldDoesNotThrowAndRetryIsStable() {
         String id = create(Map.of());
-        Map<String, Object> request = new HashMap<>(Map.of("tabId", TAB, "commandId", "nullable", "expectedPauseGeneration", 0, "action", "pause"));
+        Map<String, Object> request = new HashMap<>(Map.of("tabId", TAB, "commandId", "nullable", "commandSequence", SEQUENCES.incrementAndGet(), "expectedPauseGeneration", 0, "action", "pause"));
         request.put("frameIndex", null);
         Map<String, Object> receipt = runtime.command(OWNER, id, request);
         assertEquals("completed", receipt.get("status")); assertEquals(receipt, runtime.command(OWNER, id, request));
@@ -961,7 +1099,7 @@ class DebugRuntimeTest {
         fail("Expected pause " + generation + ", got " + snapshot); return null;
     }
     private Map<String, Object> command(Map<String, Object> paused, String action, Map<String, Object> extras) {
-        Map<String, Object> result = new HashMap<>(Map.of("tabId", TAB, "commandId", UUID.randomUUID().toString(), "expectedPauseGeneration", paused.get("pauseGeneration"), "action", action)); result.putAll(extras); return result;
+        Map<String, Object> result = new HashMap<>(Map.of("tabId", TAB, "commandId", UUID.randomUUID().toString(), "commandSequence", SEQUENCES.incrementAndGet(), "expectedPauseGeneration", paused.get("pauseGeneration"), "action", action)); result.putAll(extras); return result;
     }
     private Map<String, Object> setBreakpoints(String id, Map<String, Object> fields) {
         return runtime.breakpoints(OWNER, id, command(runtime.session(OWNER, id, TAB), "setBreakpoints", fields));

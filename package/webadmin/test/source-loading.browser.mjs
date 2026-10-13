@@ -30,7 +30,7 @@ async function response(kind, value, params) {
 const api = {
     get:async(path,params)=>{
         calls.push(['GET',path,params]);
-        if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion:1,controlAllowed:true,evaluationAllowed:false,globalAllowed:false,armRequestExpiresAt:Date.now()+60000});
+        if(path.endsWith('/capabilities'))return JSON.stringify({available:true,apiVersion: 1, commandProtocol: 2,controlAllowed:true,evaluationAllowed:false,globalAllowed:false,armRequestExpiresAt:Date.now()+60000});
         if(path.endsWith('/sources'))return response('list',sources(params.channelId),params);
         if(path.includes('/sources/'))return response('detail',source(path.split('/').pop(),params.debugSessionId && session?.status==='paused'?2:1),params);
         if(path.includes('/sessions/'))return JSON.stringify(session);

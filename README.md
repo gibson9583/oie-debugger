@@ -2,6 +2,8 @@
 
 Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
+This checkout includes unreleased fixes. The signed 1.0.0 ZIP linked below still defaults to enabled and limits a session to 256 commands. Build this checkout to use the updated behavior described here; see [validation instructions](docs/Testing.md).
+
 ![A sample order paused in the debugger, with its deployed script, variables, and call stack visible](docs/images/debugger-paused.png)
 
 ## What you can do
@@ -23,7 +25,12 @@ Use Java 17 or newer, **OIE 4.6.0**, and **Web Administrator with plugin API 4.7
 1. Download [oie-debugger-1.0.0.zip](https://github.com/gibson9583/oie-debugger/releases/download/v1.0.0/oie-debugger-1.0.0.zip) from the [signed 1.0.0 release](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.0).
 2. Install the ZIP through the engine's extension installer.
 3. Restart the engine, then reload Web Administrator.
-4. Open **Monitor → Debugger**.
+4. In the **JavaScript Debugger** extension properties, set `enabled=true`, then redeploy the channels you want to debug.
+5. Open **Monitor → Debugger**.
+
+The debugger is disabled by default. Enabling it adds JavaScript observation across the engine, including channels without an armed session. Idle observation skips unnecessary nested function frames, but still has a cost. Set `enabled=false` when finished debugging, especially on a shared or production engine. User and channel access restrictions do not limit where observation hooks run.
+
+After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` settings remain enabled on upgrade.
 
 The engine's JavaScript setting is `rhino.optimizationlevel=-1`. This is the default when the property is absent from `conf/mirth.properties`. If the property is already present, set its value to `-1` before restarting.
 

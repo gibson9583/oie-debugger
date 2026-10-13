@@ -2,6 +2,8 @@
 
 Engine permissions determine which debugger tools a user can open and use. Extension properties provide an additional way to select the users and channels that participate in debugging.
 
+This page describes the current development build. The published 1.0.0 release defaults to enabled and limits each session to 256 commands; its **End session** control remains available at that limit.
+
 ## Grant the required permissions
 
 Use the engine's permission management to assign:
@@ -23,7 +25,7 @@ Open the **JavaScript Debugger** extension properties in the engine's extension 
 
 | Property | How to use it |
 | --- | --- |
-| `enabled` | Set to `true` to make the debugger available. Default: `true`. |
+| `enabled` | Set to `true` to enable JavaScript observation and debugging. Default: `false`. Redeploy target channels after enabling. |
 | `evaluationEnabled` | Set to `true` to make expression tools available to users with Evaluate permission. Default: `true`. |
 | `allowedUserIds` | Enter comma-separated numeric engine user IDs to select users, for example `7,12`. |
 | `allowedChannelIds` | Enter comma-separated channel IDs to select channels. Use `*` to include all channels allowed by the user's engine permissions. |
@@ -35,6 +37,10 @@ An empty list delegates that choice to the engine's permissions. A populated lis
 For example, `allowedUserIds=7,12` together with `evaluationUserIds=7` allows both selected users to use their granted debugger tools, while expression features are available to user `7` with Evaluate permission. Each user's engine permissions still apply.
 
 After saving access-property changes, arm a fresh session to use the updated settings.
+
+Enabling the debugger adds observation hooks across the engine, even without an armed session. Idle observation avoids frames for nested functions in an already observed source, but observation and active debugging still add processing cost. User and channel restrictions control access; they do not remove hooks from other channels. Set `enabled=false` outside debugging windows on shared or production engines. Disabling releases paused messages. Re-enable and redeploy the target channels before the next debugging session.
+
+An explicitly saved `enabled=true` setting remains enabled after an upgrade. Reload Web Administrator after upgrading so commands use the current retry protocol.
 
 ## Choose a target execution
 
@@ -83,6 +89,10 @@ Keep the Debugger tab open and use a separate administration tab for engine acti
 - **Session ended**: choose **Clear session** to prepare another run.
 
 Keep the Debugger page open in the same browser tab while working. The page maintains the session connection as you inspect and step. Choose **End session** to finish the session and release execution.
+
+There is no lifetime command-count limit for a session. The server keeps the latest 64 completed command receipts plus pending work. The browser serializes commands and reuses the same sequence and request on a retry. A retry whose receipt has expired is rejected without executing again; end the session and arm a new one if its result cannot be recovered. Pause-duration and connection limits still apply.
+
+Auditable requests record the action (such as inspect, evaluate, or set-value), session and channel once per HTTP request. A receipt poll is a separate request. Expressions, values and request bodies are excluded; an accepted queued request is not proof that its action completed. Internal debugger failures produce a first warning with sanitized stack information in the engine log, with repeat counts in capabilities.
 
 The debugger also ends the session when its maximum pause is reached or its connection expires. Use **Clear session** to prepare a fresh run.
 

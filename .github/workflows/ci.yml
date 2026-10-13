@@ -36,7 +36,7 @@ jobs:
             oie/server-lib/mirth-server.jar oie/server-lib/mirth-client-core.jar \
             oie/server-lib/donkey/donkey-model.jar oie/server-lib/donkey/donkey-server.jar
           ENGINE_DIR="$RUNNER_TEMP/engine-inputs/oie" bash scripts/install-engine-jars.sh
-          rm -rf "$RUNNER_TEMP/engine-inputs" "$RUNNER_TEMP/oie.tar.gz"
+          rm -rf "$RUNNER_TEMP/engine-inputs"
       - name: Build package and run JVM and JavaScript tests
         run: mvn -B -ntp clean verify
       - name: Install Chromium
@@ -49,6 +49,13 @@ jobs:
         run: |
           python3 scripts/verify-package.py package/target/oie-debugger-*.zip
           python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Install into OIE and exercise the real Web Administrator
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/websupport.zip" https://github.com/gibson9583/oie-web-support-plugin/releases/download/v1.0.5/websupport-1.0.5.zip
+          echo "ee7952e42bd1282727ee77cad529c0676557b1dc615c03548bd6676373214755  $RUNNER_TEMP/websupport.zip" | sha256sum -c -
+          python3 scripts/test-engine.py --engine "$RUNNER_TEMP/oie.tar.gz" \
+            --web-support "$RUNNER_TEMP/websupport.zip" --package package/target/oie-debugger-*.zip \
+            --output test-results/engine --artifacts "$RUNNER_TEMP/debugger-runtime-inputs/sha256" --benchmark
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -62,3 +69,8 @@ jobs:
           name: debugger-package
           path: package/target/oie-debugger-*.zip
           if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: debugger-runtime-inputs
+          path: ${{ runner.temp }}/debugger-runtime-inputs/sha256/
