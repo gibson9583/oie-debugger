@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <pluginMetaData path="oie-debugger">
     <name>JavaScript Debugger</name>
-    <author>Open Integration Engine</author>
+    <author>Chris Gibson</author>
     <pluginVersion>${project.version}</pluginVersion>
     <mirthVersion>${plugin.supported.oie.versions}</mirthVersion>
     <url>https://github.com/gibson9583/oie-debugger</url>
