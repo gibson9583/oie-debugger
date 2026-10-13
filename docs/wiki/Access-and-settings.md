@@ -38,7 +38,7 @@ For example, `allowedUserIds=7,12` together with `evaluationUserIds=7` allows bo
 
 After saving access-property changes, arm a fresh session to use the updated settings.
 
-Enabling the debugger adds observation hooks across the engine, even without an armed session. Idle observation avoids frames for nested functions in an already observed source, but observation and active debugging still add processing cost. User and channel restrictions control access; they do not remove hooks from other channels. Set `enabled=false` outside debugging windows on shared or production engines. Disabling releases paused messages. Re-enable and redeploy the target channels before the next debugging session.
+Enabling the debugger adds observation hooks across the engine, even without an armed session. Idle observation reuses scope observers and avoids repeated source-registry locking, but observation and active debugging still add processing cost. User and channel restrictions control access; they do not remove hooks from other channels. Set `enabled=false` outside debugging windows on shared or production engines. Disabling releases paused messages. Re-enable and redeploy the target channels before the next debugging session.
 
 An explicitly saved `enabled=true` setting remains enabled after an upgrade. Reload Web Administrator after upgrading so commands use the current retry protocol.
 

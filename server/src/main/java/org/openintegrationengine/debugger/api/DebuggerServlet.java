@@ -63,11 +63,18 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
                         + " restriction");
     }
 
+    private void auditTarget(String channelId) {
+        // OIE resolves channelId parameters to real channels when encoding events.
+        // A scalar target survives that adapter, including the virtual global target.
+        parameterMap.put("debugTarget", channelId);
+        if (!"global".equals(channelId)) parameterMap.put("channelId", channelId);
+    }
+
     private void channel(String channelId) {
+        auditTarget(channelId);
         access();
         if ("global".equals(channelId)) {
             requireGlobalAccess();
-            parameterMap.put("channelId", "global");
         } else {
             if (!DebuggerPlugin.policy().channel(channelId))
                 throw new SecurityException(
@@ -134,6 +141,7 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
         // Verify ownership before releasing a session whose permissions were revoked.
         // These endpoints authorize here rather than in the engine's pre-invocation check.
         parameterMap.put("debugSessionId", id);
+        auditTarget(Objects.toString(session.get("channelId"), ""));
         try {
             access();
             requireOperation("debuggerSession");
@@ -321,6 +329,7 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
                     parameterMap.put("action", "arm");
                     Map<String, Object> options = Json.read(body);
                     String channelId = text(options, "channelId");
+                    auditTarget(channelId);
                     // Authorize inside the creation lookup so a denied recovery can release only
                     // this owner/tab's original lease, just like the owned-session endpoints.
                     return runtime.create(

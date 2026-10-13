@@ -2,6 +2,9 @@ package org.openintegrationengine.debugger.runtime;
 
 import static org.openintegrationengine.debugger.runtime.DebugOptions.*;
 
+import com.mirth.connect.userutil.ImmutableConnectorMessage;
+import com.mirth.connect.userutil.ImmutableMessage;
+
 import org.mozilla.javascript.*;
 import org.mozilla.javascript.Callable;
 import org.mozilla.javascript.debug.*;
@@ -33,6 +36,18 @@ public final class DebugRuntime implements Debugger {
     private static final DebugRuntime INSTANCE = new DebugRuntime();
     private static final int MAX_SESSIONS = 32, MAX_PAUSES = 4;
     private static final long ARM_REQUEST_WINDOW_MILLIS = 30_000;
+    // Cache the immutable engine accessor, never scope or message identity values.
+    private static final ClassValue<java.lang.reflect.Method> MESSAGE_CHANNEL =
+            new ClassValue<>() {
+                @Override
+                protected java.lang.reflect.Method computeValue(Class<?> type) {
+                    try {
+                        return type.getMethod("getChannelId");
+                    } catch (NoSuchMethodException unavailable) {
+                        throw new IllegalStateException("Engine message channel accessor is unavailable", unavailable);
+                    }
+                }
+            };
     private final SourceRegistry registry = new SourceRegistry();
     private final ConcurrentMap<String, DebugSession> sessions = new ConcurrentHashMap<>();
     private final Set<DebugSession> activeSessions = ConcurrentHashMap.newKeySet();
@@ -589,24 +604,55 @@ public final class DebugRuntime implements Debugger {
         if (!enabled) return null;
         Object data = context.getDebuggerContextData();
         if (!(data instanceof Execution execution)) return null;
-        // Context-owned cache: no global monitor, reflection, or frame allocation on
-        // repeated calls. Weak keys avoid retaining dynamic compiled scripts.
-        SourceRegistry.Source source = execution.sources.get(script);
-        if (source == null) {
-            source = registry.compiled(script);
+        // Reuse idle observers within this context. The activation scope is only
+        // available in onEnter; a shared source does not prove a shared channel.
+        // Weak keys avoid retaining dynamic compiled scripts.
+        SourceObserver observer = execution.sources.get(script);
+        if (observer == null) {
+            SourceRegistry.Source source = registry.compiled(script);
             if (source == null) return null;
             if (execution.sources.size() >= SourceRegistry.MAX_SOURCES) execution.sources.clear();
-            execution.sources.put(script, source);
+            observer = new SourceObserver(source);
+            execution.sources.put(script, observer);
         }
-        if (!source.valid) return null;
-        if (activeSessions.isEmpty()
-                && !execution.frames.isEmpty()
-                && execution.frames.get(execution.frames.size() - 1).source == source) {
-            // The enclosing frame already observed this exact source. Keep frames
-            // for other sources so eval and cross-scope calls retain attribution.
-            return null;
+        if (!observer.source.valid) return null;
+        return activeSessions.isEmpty() ? observer : new Frame(execution, script, observer.source);
+    }
+
+    /** Idle callbacks retain no activation or call stack and never claim a session. */
+    private final class SourceObserver implements DebugFrame {
+        final SourceRegistry.Source source;
+        final Set<String> observedChannels = new HashSet<>();
+
+        SourceObserver(SourceRegistry.Source source) {
+            this.source = source;
         }
-        return new Frame(execution, script, source);
+
+        @Override
+        public void onEnter(Context context, Scriptable activation, Scriptable self, Object[] args) {
+            if (!enabled || !source.valid) return;
+            try {
+                String channel = identify(activation, false).channel;
+                if (!observedChannels.contains(channel)) {
+                    registry.observe(source, channel);
+                    observedChannels.add(channel);
+                }
+            } catch (RuntimeException failure) {
+                failed(failure);
+            }
+        }
+
+        @Override
+        public void onLineChange(Context context, int line) {}
+
+        @Override
+        public void onExceptionThrown(Context context, Throwable exception) {}
+
+        @Override
+        public void onExit(Context context, boolean byThrow, Object result) {}
+
+        @Override
+        public void onDebuggerStatement(Context context) {}
     }
 
     private final class Frame implements DebugFrame {
@@ -631,7 +677,7 @@ public final class DebugRuntime implements Debugger {
             try {
                 this.scope = activation;
                 this.thisObject = thisObject;
-                identity = identify(activation);
+                identity = identify(activation, true);
                 execution.frames.add(this);
                 registry.observe(source, identity.channel);
                 if (execution.frames.size() > 1) {
@@ -1088,7 +1134,7 @@ public final class DebugRuntime implements Debugger {
                 && (session.includeLifecycle || identity.messageId != null);
     }
 
-    private Identity identify(Scriptable scope) {
+    private Identity identify(Scriptable scope, boolean includeMessage) {
         Scriptable top = ScriptableObject.getTopLevelScope(scope);
         Object channelValue = SafeInspector.unwrap(SafeInspector.ownData(top, "channelId"));
         String channel = channelValue instanceof String text && !text.isBlank() ? text : "global";
@@ -1098,20 +1144,23 @@ public final class DebugRuntime implements Debugger {
         if (!trustedMessage(raw)) raw = SafeInspector.unwrap(SafeInspector.ownData(top, "message"));
         if (trustedMessage(raw)) {
             try {
-                Object actualChannel = raw.getClass().getMethod("getChannelId").invoke(raw);
+                Object actualChannel = MESSAGE_CHANNEL.get(raw.getClass()).invoke(raw);
                 // Scope and trusted message must agree; inconsistent identities never match a user
                 // channel.
                 if (actualChannel instanceof String text && !channel.equals(text))
                     channel = "unverified";
-                Object actualMessage = raw.getClass().getMethod("getMessageId").invoke(raw);
-                if (actualMessage instanceof Number number)
-                    message = Long.toString(number.longValue());
-                if (raw.getClass().getName().endsWith("ImmutableConnectorMessage")) {
-                    Object actualConnector = raw.getClass().getMethod("getMetaDataId").invoke(raw);
-                    if (actualConnector instanceof Number number)
-                        connector = Integer.toString(number.intValue());
-                    Object attempts = raw.getClass().getMethod("getSendAttempts").invoke(raw);
-                    if (attempts instanceof Number number) sendAttempts = number.intValue();
+                // Idle source attribution needs the channel consistency check only.
+                if (includeMessage) {
+                    Object actualMessage = raw.getClass().getMethod("getMessageId").invoke(raw);
+                    if (actualMessage instanceof Number number)
+                        message = Long.toString(number.longValue());
+                    if (raw.getClass().getName().endsWith("ImmutableConnectorMessage")) {
+                        Object actualConnector = raw.getClass().getMethod("getMetaDataId").invoke(raw);
+                        if (actualConnector instanceof Number number)
+                            connector = Integer.toString(number.intValue());
+                        Object attempts = raw.getClass().getMethod("getSendAttempts").invoke(raw);
+                        if (attempts instanceof Number number) sendAttempts = number.intValue();
+                    }
                 }
             } catch (ReflectiveOperationException ignored) {
                 channel = "unverified";
@@ -1121,9 +1170,9 @@ public final class DebugRuntime implements Debugger {
     }
 
     private static boolean trustedMessage(Object raw) {
-        return SafeInspector.engineClass(
-                        raw, "com.mirth.connect.userutil.ImmutableConnectorMessage")
-                || SafeInspector.engineClass(raw, "com.mirth.connect.userutil.ImmutableMessage");
+        return raw != null
+                && (raw.getClass() == ImmutableConnectorMessage.class
+                        || raw.getClass() == ImmutableMessage.class);
     }
 
     private DebugSession owned(String owner, String id, String tab) {
@@ -1243,7 +1292,7 @@ public final class DebugRuntime implements Debugger {
 
     static final class Execution {
         final List<Frame> frames = new ArrayList<>();
-        final Map<DebuggableScript, SourceRegistry.Source> sources = new WeakHashMap<>();
+        final Map<DebuggableScript, SourceObserver> sources = new WeakHashMap<>();
         Throwable lastException;
     }
 

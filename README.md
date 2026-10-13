@@ -28,7 +28,7 @@ Use Java 17 or newer, **OIE 4.6.0**, and **Web Administrator with plugin API 4.7
 4. In the **JavaScript Debugger** extension properties, set `enabled=true`, then redeploy the channels you want to debug.
 5. Open **Monitor → Debugger**.
 
-The debugger is disabled by default. Enabling it adds JavaScript observation across the engine, including channels without an armed session. Idle observation skips unnecessary nested function frames, but still has a cost. Set `enabled=false` when finished debugging, especially on a shared or production engine. User and channel access restrictions do not limit where observation hooks run.
+The debugger is disabled by default. Enabling it adds JavaScript observation across the engine, including channels without an armed session. Idle observation reuses scope observers and avoids repeated source-registry locking, but still has a cost. Set `enabled=false` when finished debugging, especially on a shared or production engine. User and channel access restrictions do not limit where observation hooks run.
 
 After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` settings remain enabled on upgrade.
 

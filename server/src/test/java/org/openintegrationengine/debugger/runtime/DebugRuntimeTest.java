@@ -31,12 +31,148 @@ class DebugRuntimeTest {
         runtime.shutdown(); workers.shutdownNow(); assertTrue(workers.awaitTermination(3, TimeUnit.SECONDS), "Owned script workers must exit");
     }
 
-    @Test void idleNestedCallsHaveNoFramesAndDoNotWaitForTheRegistryMonitor() throws Exception {
+    @Test void idleReentrantSameSourceIsObservedInBothChannelScopes() {
+        factory.call(cx -> {
+            Script script = cx.compileString("if (channelId === 'channel-a') bridge(); else 42;",
+                    "shared-global-preprocessor", 1, null);
+            Scriptable first = cx.initStandardObjects(), second = cx.initStandardObjects();
+            ScriptableObject.putProperty(first, "channelId", CHANNEL);
+            ScriptableObject.putProperty(second, "channelId", "channel-b");
+            ScriptableObject.putProperty(first, "bridge", new BaseFunction() {
+                @Override public Object call(Context context, Scriptable scope, Scriptable self, Object[] args) {
+                    return script.exec(context, second);
+                }
+            });
+            assertEquals(42.0, script.exec(cx, first));
+            return null;
+        });
+        assertSharedSourceObserved();
+    }
+
+    @Test void idleSameSourceFunctionUsesItsCurrentLexicalScope() {
+        factory.call(cx -> {
+            Script script = cx.compileString("function shared(){return 42;} bridge(shared);",
+                    "shared-functions", 1, null);
+            Scriptable first = cx.initStandardObjects(), second = cx.initStandardObjects();
+            ScriptableObject.putProperty(first, "channelId", CHANNEL);
+            ScriptableObject.putProperty(second, "channelId", "channel-b");
+            ScriptableObject.putProperty(first, "bridge", new BaseFunction() {
+                @Override public Object call(Context context, Scriptable scope, Scriptable self, Object[] args) {
+                    Function function = (Function) args[0];
+                    function.setParentScope(second);
+                    return function.call(context, second, second, Context.emptyArgs);
+                }
+            });
+            assertEquals(42.0, script.exec(cx, first));
+            return null;
+        });
+        assertSharedSourceObserved();
+    }
+
+    @Test void idleSameScopeIdentityChangesAreObserved() {
+        factory.call(cx -> {
+            Scriptable scope = cx.initStandardObjects();
+            ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            assertEquals(42.0, cx.evaluateString(scope,
+                    "function shared(){return 42;} shared(); channelId='channel-b'; shared();",
+                    "shared-functions", 1, null));
+            return null;
+        });
+        assertSharedSourceObserved();
+    }
+
+    @Test void idleObserversRecheckTrustedMessageIdentityOnEveryEntry() {
+        ImmutableConnectorMessage message = (ImmutableConnectorMessage) message(CHANNEL, 1, 0);
+        factory.call(cx -> {
+            Scriptable scope = cx.initStandardObjects();
+            ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            ScriptableObject.putProperty(scope, "connectorMessage", Context.javaToJS(message, scope));
+            ScriptableObject.putProperty(scope, "bridge", new BaseFunction() {
+                @Override public Object call(Context context, Scriptable scope, Scriptable self, Object[] args) {
+                    when(message.getChannelId()).thenReturn("channel-b");
+                    return null;
+                }
+            });
+            assertEquals(42.0, cx.evaluateString(scope,
+                    "function shared(){return 42;} shared(); bridge(); shared();", "identity-change", 1, null));
+            return null;
+        });
+        assertEquals(1, runtime.sources(CHANNEL).size());
+        assertEquals(1, runtime.sources("unverified").size());
+        assertTrue(runtime.sources("channel-b").isEmpty(), "Inconsistent scope/message identities cannot attribute a source to B");
+    }
+
+    private void assertSharedSourceObserved() {
+        assertEquals(1, runtime.sources(CHANNEL).size());
+        assertEquals(runtime.sources(CHANNEL), runtime.sources("channel-b"),
+                "The exact same compiled source must be discoverable in both channels");
+    }
+
+    @Test void anArmDuringIdleExecutionUsesLiveFramesOnTheNextCall() throws Exception {
+        var idle = new CountDownLatch(1);
+        var proceed = new CountDownLatch(1);
+        Future<Object> result = workers.submit(() -> factory.call(cx -> {
+            Scriptable scope = cx.initStandardObjects();
+            ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            ScriptableObject.putProperty(scope, "bridge", new BaseFunction() {
+                @Override public Object call(Context context, Scriptable scope, Scriptable self, Object[] args) {
+                    idle.countDown(); awaitLatch(proceed); return null;
+                }
+            });
+            return cx.evaluateString(scope, "function hot(){return 42;} hot(); bridge(); hot();", "idle-to-active", 1, null);
+        }));
+        try {
+            assertTrue(idle.await(3, TimeUnit.SECONDS));
+            String id = create(Map.of());
+            proceed.countDown();
+            Map<String, Object> paused = awaitPause(id, 1);
+            assertEquals("hot", frames(paused).get(0).get("functionName"));
+            receipt(id, command(paused, "continue", Map.of()));
+            assertEquals(42.0, result.get(3, TimeUnit.SECONDS));
+        } finally { proceed.countDown(); }
+    }
+
+    @Test void cachedIdleObserversRejectAReplacedSourceInTheSameContext() {
+        factory.call(cx -> {
+            Scriptable scope = cx.initStandardObjects();
+            ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            Script original = cx.compileString("function hot(){return 1;} hot();", "transformer", 1, null);
+            assertEquals(1.0, original.exec(cx, scope));
+            String oldId = runtime.sources(CHANNEL).get(0).get("id").toString();
+            Script replacement = cx.compileString("function hot(){return 2;} hot();", "transformer", 1, null);
+            assertEquals(1.0, original.exec(cx, scope));
+            assertTrue(runtime.sources(CHANNEL).isEmpty());
+            assertThrows(IllegalArgumentException.class, () -> runtime.source(oldId));
+            assertEquals(2.0, replacement.exec(cx, scope));
+            assertEquals(1, runtime.sources(CHANNEL).size());
+            assertNotEquals(oldId, runtime.sources(CHANNEL).get(0).get("id"));
+            return null;
+        });
+    }
+
+    @Test void cachedIdleObserversDoNotRestoreAnInvalidatedChannel() {
+        factory.call(cx -> {
+            Scriptable scope = cx.initStandardObjects();
+            ScriptableObject.putProperty(scope, "channelId", CHANNEL);
+            Script script = cx.compileString("function hot(){return 1;} hot();", "shared-preprocessor", 1, null);
+            assertEquals(1.0, script.exec(cx, scope));
+            assertEquals(1, runtime.sources(CHANNEL).size());
+            runtime.invalidate(CHANNEL, "Undeployed");
+            assertEquals(1.0, script.exec(cx, scope));
+            assertTrue(runtime.sources(CHANNEL).isEmpty());
+            ScriptableObject.putProperty(scope, "channelId", "channel-b");
+            assertEquals(1.0, script.exec(cx, scope));
+            assertEquals(1, runtime.sources("channel-b").size());
+            return null;
+        });
+    }
+
+    @Test void idleNestedCallsReuseObserversAndDoNotWaitForTheRegistryMonitor() throws Exception {
         String closedId = create(Map.of());
         runtime.close(OWNER, closedId, TAB);
         var warmed = new CountDownLatch(1);
         var proceed = new CountDownLatch(1);
-        AtomicInteger frames = new AtomicInteger();
+        Set<DebugFrame> frames = Collections.newSetFromMap(new IdentityHashMap<>());
         var field = DebugRuntime.class.getDeclaredField("registry"); field.setAccessible(true);
         Object registry = field.get(runtime);
         Future<Object> result = workers.submit(() -> factory.call(cx -> {
@@ -49,7 +185,7 @@ class DebugRuntimeTest {
                 public DebugFrame getFrame(Context context, DebuggableScript script) {
                     if (++callbacks == 10) { warmed.countDown(); awaitLatch(proceed); }
                     DebugFrame frame = original.getFrame(context, script);
-                    if (frame != null) frames.incrementAndGet();
+                    if (frame != null) frames.add(frame);
                     return frame;
                 }
             }, cx.getDebuggerContextData());
@@ -63,7 +199,7 @@ class DebugRuntimeTest {
                 proceed.countDown();
                 assertEquals(10000.0, result.get(3, TimeUnit.SECONDS));
             }
-            assertEquals(1, frames.get(), "Only the enclosing source-observation frame is necessary");
+            assertEquals(2, frames.size(), "The script and hot function each reuse one scope observer");
             assertEquals(1, runtime.sources(CHANNEL).size());
         } finally { proceed.countDown(); }
     }

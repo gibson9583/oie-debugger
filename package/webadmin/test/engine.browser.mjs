@@ -68,12 +68,10 @@ try {
     ),
   );
   await page.getByRole("button", { name: /Sign in|Log in/i }).click();
-  await page.waitForTimeout(1500);
-  if (
-    await page
-      .getByText("Welcome to Open Integration Engine", { exact: true })
-      .isVisible()
-  ) {
+  const onboarding = page.getByText("Welcome to Open Integration Engine", { exact: true });
+  const debuggerLink = page.getByText("Debugger", { exact: true });
+  await onboarding.or(debuggerLink).first().waitFor({ state: "visible", timeout: 30000 });
+  if (await onboarding.isVisible()) {
     await page
       .locator('input[autocomplete="new-password"]')
       .nth(0)
@@ -90,7 +88,7 @@ try {
   }
   await page.screenshot({ path: c.attempt + "/after-login.png" });
   console.log("Login submitted", await page.title());
-  await page.getByText("Debugger", { exact: true }).click();
+  await debuggerLink.click();
   await page
     .getByRole("heading", { name: "JavaScript Debugger", exact: true })
     .waitFor();

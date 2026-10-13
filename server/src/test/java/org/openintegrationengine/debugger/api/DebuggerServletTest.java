@@ -18,6 +18,7 @@ import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.Response;
 import com.mirth.connect.client.core.Operation;
 import com.mirth.connect.model.Channel;
+import com.mirth.connect.model.ServerEvent;
 import com.mirth.connect.server.api.DontCheckAuthorized;
 import com.mirth.connect.server.controllers.*;
 import com.mirth.connect.server.util.CompiledScriptCache;
@@ -735,13 +736,105 @@ class DebuggerServletTest {
         assertClosed(id);
     }
 
-    @Test void globalCommandsHaveAnExplicitGlobalAuditTarget() throws Exception {
-        String global = createSession("global", Map.of("tabId", TAB, "includeGlobal", true));
-        assertEquals(200, servlet("debuggerCommand").command(global, Json.write(Map.of("tabId", TAB,
-                "commandId", "global-command", "commandSequence", 1, "expectedPauseGeneration", 0, "action", "pause"))).getStatus());
-        verify(authorization).auditAuthorizationRequest(eq(7), any(), argThat(parameters ->
-                "global".equals(parameters.get("channelId")) && "pause".equals(parameters.get("action"))),
-                eq(com.mirth.connect.model.ServerEvent.Outcome.SUCCESS), any());
+    @ParameterizedTest @ValueSource(strings = {"global", "channel-a"})
+    void targetsSurviveTheEngineAuditEncoderForArmCommandRetryAndClose(String target) throws Exception {
+        runtime.close(OWNER, id, TAB);
+        List<ServerEvent> events = captureEncodedAuditEvents();
+        String options = Json.write(Map.of("channelId", target, "tabId", TAB, "includeGlobal", target.equals("global"),
+                "requestId", UUID.randomUUID().toString(), "requestExpiresAt", runtime.status().get("armRequestExpiresAt")));
+        String sessionId;
+        try (MockedStatic<DebuggerPlugin> plugin = mockStatic(DebuggerPlugin.class, CALLS_REAL_METHODS)) {
+            plugin.when(DebuggerPlugin::unavailableReason).thenReturn(null);
+            sessionId = body(servlet("debuggerCreate").create(options)).get("id").toString();
+            assertEquals(sessionId, body(servlet("debuggerCreate").create(options)).get("id"));
+        }
+        String command = Json.write(Map.of("tabId", TAB, "commandId", "audit-command", "commandSequence", 1,
+                "expectedPauseGeneration", 0, "action", "pause", "expression", "PRIVATE MESSAGE"));
+        assertEquals(200, servlet("debuggerCommand").command(sessionId, command).getStatus());
+        assertEquals(200, servlet("debuggerCommand").command(sessionId, command).getStatus());
+        assertEquals(200, servlet("debuggerClose").close(sessionId, TAB).getStatus());
+        assertEquals(200, servlet("debuggerClose").close(sessionId, TAB).getStatus());
+        assertEquals(List.of("arm", "arm", "pause", "pause", "close", "close"), events.stream()
+                .map(event -> event.getAttributes().get("action").strip()).toList());
+        for (ServerEvent event : events) assertAuditTarget(event, target, ServerEvent.Outcome.SUCCESS);
+        assertEquals(sessionId, events.get(2).getAttributes().get("debugSessionId").strip());
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"global", "channel-a"})
+    void failedBreakpointCommandsRetainTheirEncodedTarget(String target) throws Exception {
+        List<ServerEvent> events = captureEncodedAuditEvents();
+        String sessionId = createSession(target, Map.of("tabId", TAB, "includeGlobal", target.equals("global")));
+        String command = Json.write(Map.of("tabId", TAB, "commandId", "invalid", "commandSequence", 1,
+                "expectedPauseGeneration", 0, "action", "setBreakpoints", "sourceId", "missing", "lines", List.of()));
+        assertEquals(400, servlet("debuggerBreakpoints").breakpoints(sessionId, command).getStatus());
+        assertEquals(400, servlet("debuggerCommand").command(sessionId, command).getStatus());
+        assertEquals(2, events.size());
+        for (ServerEvent event : events) {
+            assertEquals("setBreakpoints", event.getAttributes().get("action").strip());
+            assertAuditTarget(event, target, ServerEvent.Outcome.FAILURE);
+        }
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"enabled", "debuggerSession", "debuggerCommand", "global"})
+    void revokedGlobalPermissionsRetainTheEncodedTarget(String restriction) throws Exception {
+        List<ServerEvent> events = captureEncodedAuditEvents();
+        String sessionId = createSession("global", Map.of("tabId", TAB, "includeGlobal", true));
+        if (restriction.equals("enabled")) { policy.setProperty("enabled", "false"); applyPolicy(); }
+        else if (restriction.equals("global")) nativeChannelRestriction(true);
+        else denyOperations(restriction);
+        forbidden(() -> servlet("debuggerCommand").command(sessionId, Json.write(Map.of("tabId", TAB,
+                "commandId", "denied", "commandSequence", 1, "expectedPauseGeneration", 0, "action", "pause"))));
+        assertClosed(sessionId);
+        assertEquals(1, events.size());
+        assertAuditTarget(events.get(0), "global", ServerEvent.Outcome.FAILURE);
+    }
+
+    @Test void deniedGlobalArmRetainsItsEncodedTarget() throws Exception {
+        List<ServerEvent> events = captureEncodedAuditEvents();
+        nativeChannelRestriction(true);
+        forbidden(() -> servlet("debuggerCreate").create(Json.write(Map.of("channelId", "global", "tabId", TAB,
+                "includeGlobal", true))));
+        assertEquals(1, events.size());
+        assertAuditTarget(events.get(0), "global", ServerEvent.Outcome.FAILURE);
+    }
+
+    @Test void foreignSessionDenialDoesNotDiscloseItsTarget() throws Exception {
+        List<ServerEvent> events = captureEncodedAuditEvents();
+        String foreign = runtime.create("another-owner", "global", Map.of("tabId", TAB, "includeGlobal", true)).get("id").toString();
+        forbidden(() -> servlet("debuggerClose").close(foreign, TAB));
+        assertEquals(1, events.size());
+        assertFalse(events.get(0).getAttributes().containsKey("debugTarget"));
+        assertEquals("armed", runtime.session("another-owner", foreign, TAB).get("status"));
+    }
+
+    private List<ServerEvent> captureEncodedAuditEvents() throws Exception {
+        List<ServerEvent> events = new java.util.ArrayList<>();
+        EventController eventController = mock(EventController.class);
+        doAnswer(call -> { events.add(call.getArgument(0)); return null; }).when(eventController).dispatchEvent(any());
+        // Exercise the installed engine's encoder, including its special channelId lookup.
+        for (var entry : Map.<String, Object>of("eventController", eventController,
+                "channelController", controllers.createChannelController(), "serverId", "test-server").entrySet()) {
+            var field = AuthorizationController.class.getDeclaredField(entry.getKey());
+            field.setAccessible(true); field.set(authorization, entry.getValue());
+        }
+        doCallRealMethod().when(authorization).auditAuthorizationRequest(anyInt(), any(), anyMap(), any(), any());
+        doAnswer(call -> {
+            if ((boolean) call.getArgument(4)) authorization.auditAuthorizationRequest(call.getArgument(0),
+                    call.getArgument(1), call.getArgument(2), ServerEvent.Outcome.SUCCESS, call.getArgument(3));
+            return true;
+        }).when(authorization).isUserAuthorized(anyInt(), any(), anyMap(), any(), anyBoolean());
+        return events;
+    }
+
+    private void assertAuditTarget(ServerEvent event, String target, ServerEvent.Outcome outcome) throws Exception {
+        assertEquals(outcome, event.getOutcome());
+        assertEquals(target, event.getAttributes().getOrDefault("debugTarget", "").strip());
+        assertFalse(event.getAttributes().toString().contains("PRIVATE"));
+        assertFalse(event.getAttributes().containsKey("body"));
+        assertFalse(event.getAttributes().containsKey("tabId"));
+        verify(authorization, never()).isUserAuthorized(anyInt(), any(), anyMap(), any(), eq(true));
+        if (target.equals("global")) assertFalse(event.getAttributes().containsKey("channel"));
+        else assertTrue(event.getAttributes().containsKey("channel"), "Keep native channel auditing for real channels");
     }
 
     @Test void engineInvocationAuditsExcludeBodiesAndTabTokens() {

@@ -243,6 +243,23 @@ class EngineRun:
         self.result["idleSlowdownByConcurrency"] = dict(zip(["1", "4"], ratios))
         assert max(ratios) < 2, "Idle debugger overhead regressed beyond the integration threshold"
 
+    def global_audit(self):
+        capabilities = self.request("GET", "/extensions/debugger/capabilities")
+        options = {"channelId": "global", "includeGlobal": True, "tabId": "global-audit",
+                "requestId": str(uuid.uuid4()), "requestExpiresAt": capabilities["armRequestExpiresAt"]}
+        session = self.request("POST", "/extensions/debugger/sessions", options)
+        recovered = self.request("POST", "/extensions/debugger/sessions", options)
+        assert recovered["id"] == session["id"], "Arm retry created a different global session"
+        path = f'/extensions/debugger/sessions/{session["id"]}'
+        command = {"tabId": options["tabId"], "commandId": str(uuid.uuid4()), "commandSequence": 1,
+                "expectedPauseGeneration": 0, "action": "pause", "expression": "PRIVATE AUDIT PAYLOAD"}
+        receipt = self.request("POST", path + "/commands", command)
+        assert self.request("POST", path + "/commands", command) == receipt, "Global command retry changed its receipt"
+        for _ in range(2):
+            assert self.request("DELETE", path + "?tabId=" + options["tabId"])["status"] == "closed"
+        self.save("global-audit-requests.json", {"sessionId": session["id"],
+                "actions": ["arm", "arm", "pause", "pause", "close", "close"]})
+
     def run(self):
         self.prepare()
         self.start()
@@ -264,6 +281,7 @@ class EngineRun:
         self.configure(True)
         self.deploy(channel)
         self.browser(channel.findtext("id"), "browser-reenabled")
+        self.global_audit()
         if self.args.benchmark:
             self.benchmark(channel)
         self.result["passed"] = True
@@ -308,7 +326,8 @@ class EngineRun:
                         requests = []
                         for path in self.output.glob("browser*/browser-http-receipts.json"):
                             requests.extend(json.loads(path.read_text()))
-                        commands = [item for item in requests if "/commands" in item["url"] and item["method"] == "POST"]
+                        requests.extend(self.receipts)
+                        commands = [item for item in requests if "/commands" in item.get("url", item.get("path", "")) and item["method"] == "POST"]
                         control_rows = [row for row in events.split("END ROW") if "NAME=Control debugger execution invoked through JavaScript Debugger" in row]
                         if commands:
                             passed = (len(control_rows) == len(commands)
@@ -317,6 +336,26 @@ class EngineRun:
                             self.save("audit-verification.json", {"passed": passed, "requests": len(commands), "events": len(control_rows)})
                             if not passed:
                                 self.result.update(passed=False, auditFailure="Request/event counts or redaction differed; see audit-verification.json")
+                        global_requests = self.output / "global-audit-requests.json"
+                        if global_requests.exists():
+                            expected = json.loads(global_requests.read_text())
+                            global_events = []
+                            for row in events.split("END ROW"):
+                                encoded = row.partition("ATTRIBUTES=")[2].partition("\nUSER_ID=")[0]
+                                if not encoded.strip():
+                                    continue
+                                attributes = {entry[0].text: (entry[1].text or "").strip()
+                                        for entry in ET.fromstring(encoded).findall("entry")}
+                                if attributes.get("debugTarget") == "global":
+                                    global_events.append({"attributes": attributes, "success": "OUTCOME=SUCCESS\n" in row})
+                            passed = (sorted(event["attributes"].get("action", "") for event in global_events) == sorted(expected["actions"])
+                                    and all(event["success"] and "channel" not in event["attributes"]
+                                        and "PRIVATE" not in str(event["attributes"]) for event in global_events)
+                                    and all(event["attributes"].get("debugSessionId") == expected["sessionId"]
+                                        for event in global_events if event["attributes"].get("action") != "arm"))
+                            self.save("global-audit-verification.json", {"passed": passed, "events": global_events})
+                            if not passed:
+                                self.result.update(passed=False, globalAuditFailure="Global targets or request outcomes differed; see global-audit-verification.json")
                 shutil.rmtree(self.root)
                 cleanup["removed"] = not self.root.exists()
         except BaseException:
