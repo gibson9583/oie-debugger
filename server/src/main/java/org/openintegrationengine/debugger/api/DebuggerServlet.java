@@ -13,6 +13,7 @@ import org.openintegrationengine.debugger.engine.AuthoredSourceMapper;
 import org.openintegrationengine.debugger.runtime.DebugRuntime;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
@@ -253,6 +254,14 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
                 (String) source.get("id"), (String) source.get("name"), runtime);
     }
 
+    private Map<String, Object> sourceForChannel(Map<String, Object> source, String channelId) {
+        // Shared compiled scripts retain every observed channel internally. Only the
+        // requested target has been authorized; never expose other channel associations.
+        Map<String, Object> result = new LinkedHashMap<>(source);
+        result.put("channels", List.of(channelId));
+        return result;
+    }
+
     private void requireCurrentSource(String id) {
         if (!currentSource(runtime.source(id)))
             throw new IllegalStateException(
@@ -288,7 +297,10 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
         return json(
                 () -> {
                     channel(channelId);
-                    return runtime.sources(channelId).stream().filter(this::currentSource).toList();
+                    return runtime.sources(channelId).stream()
+                            .filter(this::currentSource)
+                            .map(source -> sourceForChannel(source, channelId))
+                            .toList();
                 });
     }
 
@@ -308,7 +320,7 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
                         throw new SecurityException(
                                 "Source is unavailable for the selected channel");
                     requireAccessibleSource(id, debugSessionId, tabId, channelId, null);
-                    Map<String, Object> result = new LinkedHashMap<>(runtime.source(id));
+                    Map<String, Object> result = sourceForChannel(runtime.source(id), channelId);
                     result.put(
                             "authoredMappings",
                             AuthoredSourceMapper.map(
