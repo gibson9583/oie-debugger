@@ -24,6 +24,11 @@ def verify_versions(root=ROOT, environ=None):
     version = pom.findtext("m:properties/m:revision", namespaces=NS)
     require(bool(re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version or "")),
             "Maven revision must be a release version")
+    catalog = json.loads((root / "oie.json").read_text())
+    require(catalog["version"] == version, f"oie.json version must match Maven revision {version}")
+    require(catalog["filename"].replace("{version}", version) == f"oie-debugger-{version}.zip",
+            "Catalog filename must match the release package")
+    require((root / catalog["storeDocs"]).is_file(), "Catalog store documentation must exist")
     for name in ("plugin.json", "package.json", "package-lock.json"):
         data = json.loads((root / "package/webadmin" / name).read_text())
         require(data["version"] == version, f"{name} version must match Maven revision {version}")

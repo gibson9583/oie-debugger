@@ -103,3 +103,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 .github/signing/publish_release.py
+
+  # Releases created with GITHUB_TOKEN do not trigger on: release workflows.
+  catalog:
+    needs: release
+    uses: ./.github/workflows/catalog.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      CATALOG_TOKEN: ${{ secrets.CATALOG_TOKEN }}

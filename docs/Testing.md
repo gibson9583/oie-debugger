@@ -14,7 +14,7 @@ With Java 17, Python 3.12+, Node and Playwright Chromium installed:
 python3 scripts/test-engine.py \
   --engine /path/to/oie_unix_4_6_0.tar.gz \
   --web-support /path/to/websupport-1.0.5.zip \
-  --package package/target/oie-debugger-1.0.0.zip \
+  --package package/target/oie-debugger-1.0.1.zip \
   --output test-results/engine-run \
   --artifacts /path/to/shared-runtime-inputs/sha256 \
   --benchmark

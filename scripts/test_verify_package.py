@@ -18,7 +18,7 @@ class PackageTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for name in ("pom.xml", "LICENSE", "package/resources/LICENSE",
+        for name in ("pom.xml", "oie.json", "docs/store.md", "LICENSE", "package/resources/LICENSE",
                      "package/webadmin/plugin.json", "package/webadmin/package.json",
                      "package/webadmin/package-lock.json"):
             target = self.root / name
@@ -56,6 +56,18 @@ class PackageTests(unittest.TestCase):
         self.rewrite_zip(lambda entries: entries.update({"oie-debugger/libs/old.jar": b"stale"}))
         with self.assertRaisesRegex(ValueError, "exactly"):
             verify.verify_bundle(self.bundle, self.root, {})
+
+    def test_catalog_drift_rejected(self):
+        path = self.root / "oie.json"
+        for field, value, message in (("version", "9.9.9", "oie.json version"),
+                                      ("filename", "wrong.zip", "Catalog filename"),
+                                      ("storeDocs", "missing.md", "documentation must exist")):
+            with self.subTest(field=field):
+                data = json.loads((verify.ROOT / "oie.json").read_text())
+                data[field] = value
+                path.write_text(json.dumps(data))
+                with self.assertRaisesRegex(ValueError, message):
+                    verify.verify_versions(self.root, {})
 
     def test_missing_browser_bundle_rejected(self):
         self.rewrite_zip(lambda entries: entries.pop("oie-debugger/webadmin/web/plugin.js"))

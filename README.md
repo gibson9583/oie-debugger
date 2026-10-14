@@ -2,7 +2,7 @@
 
 Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
-This checkout includes unreleased fixes. The signed 1.0.0 ZIP linked below still defaults to enabled and limits a session to 256 commands. Build this checkout to use the updated behavior described here; see [validation instructions](docs/Testing.md).
+Version 1.0.1 disables debugging by default, reduces idle observation overhead, keeps long sessions usable, and applies channel access restrictions throughout source discovery and the channel picker. See the [release notes](docs/releases/1.0.1.md) for upgrade details.
 
 ![A sample order paused in the debugger, with its deployed script, variables, and call stack visible](docs/images/debugger-paused.png)
 
@@ -22,7 +22,7 @@ This checkout includes unreleased fixes. The signed 1.0.0 ZIP linked below still
 
 Use Java 17 or newer, **OIE 4.6.0**, and **Web Administrator with plugin API 4.7 or newer**. Web Administrator 1.0.1 provides this API. The engine also needs web-support endpoints, supplied by the [Web Support extension](https://github.com/gibson9583/oie-web-support-plugin).
 
-1. Download [oie-debugger-1.0.0.zip](https://github.com/gibson9583/oie-debugger/releases/download/v1.0.0/oie-debugger-1.0.0.zip) from the [signed 1.0.0 release](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.0).
+1. Download [oie-debugger-1.0.1.zip](https://github.com/gibson9583/oie-debugger/releases/download/v1.0.1/oie-debugger-1.0.1.zip) from the [signed 1.0.1 release](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.1).
 2. Install the ZIP through the engine's extension installer.
 3. Restart the engine, then reload Web Administrator.
 4. In the **JavaScript Debugger** extension properties, set `enabled=true`, then redeploy the channels you want to debug.

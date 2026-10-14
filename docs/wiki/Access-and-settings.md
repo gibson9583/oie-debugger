@@ -2,7 +2,7 @@
 
 Engine permissions determine which debugger tools a user can open and use. Extension properties provide an additional way to select the users and channels that participate in debugging.
 
-This page describes the current development build. The published 1.0.0 release defaults to enabled and limits each session to 256 commands; its **End session** control remains available at that limit.
+These settings describe version 1.0.1. When upgrading from 1.0.0, reload Web Administrator to use the current command-retry protocol. Explicitly saved enabled settings remain in effect.
 
 ## Grant the required permissions
 

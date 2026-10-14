@@ -26,8 +26,8 @@
     </modules>
 
     <properties>
-        <!-- Initial unreleased version. Keep the webadmin manifest in sync. -->
-        <revision>1.0.0</revision>
+        <!-- Keep release, catalog, and webadmin versions in sync. -->
+        <revision>1.0.1</revision>
 
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>

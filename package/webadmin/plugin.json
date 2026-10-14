@@ -2,8 +2,12 @@
   "id": "debugger",
   "name": "JavaScript Debugger",
   "author": "Chris Gibson",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Debug deployed channel JavaScript with breakpoints, stepping, frames, maps, watches and explicit evaluation controls.",
-  "oie": {"apiMin": "4.7"},
-  "client": {"entry": "web/plugin.js"}
+  "oie": {
+    "apiMin": "4.7"
+  },
+  "client": {
+    "entry": "web/plugin.js"
+  }
 }
