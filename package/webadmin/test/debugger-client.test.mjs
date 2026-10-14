@@ -21,7 +21,7 @@ function fixture(overrides = {}) {
         if (overrides[method]) return overrides[method](...args);
         return method === 'post' && args[0] === '/sessions' ? session() : { status: 'completed' };
     }]));
-    const client = new DebuggerClient({ transport, newId: () => `uuid-${++serial}`, context: () => owner, timers: {
+    const client = new DebuggerClient({ transport, canArm: overrides.canArm, newId: () => `uuid-${++serial}`, context: () => owner, timers: {
         setTimeout: (fn, ms) => { const id = ++serial; scheduled.set(id, { fn, ms }); return id; },
         clearTimeout: id => scheduled.delete(id),
     } });
@@ -82,6 +82,101 @@ test('source selection and channel list responses are fenced independently', asy
     second.resolve({ id: 'two' }); await b;
     first.resolve({ id: 'one' }); await a;
     assert.equal(client.state.source.id, 'two');
+    client.dispose();
+});
+
+test('clearing the target fences pending source reads without fetching an empty channel', async () => {
+    for (const fail of [false, true]) {
+        const list = deferred(), detail = deferred();
+        const { client, calls } = fixture({ get: path => path === '/sources' ? list.promise : detail.promise });
+        const listing = client.sources('channel-1'), loading = client.source('old-source', 'channel-1');
+        client.emit({ sources: [{ id: 'cached-source' }], source: { id: 'cached-source' } });
+        await client.sources('');
+        assert.deepEqual(client.state.sources, []);
+        assert.equal(client.state.source, null);
+        assert.equal(calls.length, 2, 'Clearing a target must not request an empty channel');
+        if (fail) {
+            list.reject(new Error('Old source list failed'));
+            detail.reject(new Error('Old source detail failed'));
+        } else {
+            list.resolve([{ id: 'old-source' }]);
+            detail.resolve({ id: 'old-source', text: 'Old protected source' });
+        }
+        await Promise.all([listing, loading]);
+        assert.deepEqual(client.state.sources, []);
+        assert.equal(client.state.source, null);
+        assert.equal(client.state.error, '');
+        client.dispose();
+    }
+});
+
+test('new arm checks current target access before requesting capabilities', async () => {
+    const checked = [];
+    const { client, calls, capabilityCalls } = fixture({ canArm: (channelId, capabilities) => {
+        checked.push([channelId, capabilities]);
+        return false;
+    } });
+    await client.arm({ channelId: 'excluded-channel' });
+    assert.deepEqual(checked, [['excluded-channel', null]]);
+    assert.equal(capabilityCalls.length, 0);
+    assert.equal(calls.length, 0);
+    assert.equal(client.state.error, 'Select an accessible channel before arming.');
+    assert.equal(client.state.busy, false);
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.session, null);
+    client.dispose();
+});
+
+test('new arm rechecks target access after awaiting capabilities and before creating a request', async () => {
+    const capabilities = deferred(), checked = [];
+    let permitted = true;
+    const { client, calls, capabilityCalls } = fixture({ capabilities: () => capabilities.promise,
+        canArm: (channelId, current) => {
+            checked.push([channelId, current]);
+            return permitted;
+        } });
+    const arming = client.arm({ channelId: 'channel-1' });
+    assert.equal(capabilityCalls.length, 1);
+    permitted = false;
+    const current = { available: true, apiVersion: 1, commandProtocol: 2,
+        controlAllowed: true, armRequestExpiresAt: 30000 };
+    capabilities.resolve(current);
+    await arming;
+    assert.deepEqual(checked, [['channel-1', null], ['channel-1', current]]);
+    assert.equal(calls.length, 0, 'No session POST may follow local target revocation');
+    assert.equal(client.state.error, 'Select an accessible channel before arming.');
+    assert.equal(client.state.pendingArm, null, 'An unsent request has no ambiguous result to recover');
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.busy, false);
+    client.dispose();
+});
+
+test('unknown arm retries bypass local target checks to reconcile the original request', async () => {
+    let permitted = true, checks = 0, posts = 0;
+    const { client, calls, capabilityCalls } = fixture({
+        canArm: () => { checks++; return permitted; },
+        post: () => {
+            if (++posts === 1) throw new Error('Response lost');
+            return session({ status: 'closed' });
+        },
+    });
+    await client.arm({ channelId: 'channel-1' });
+    const pending = client.state.pendingArm;
+    assert.ok(pending);
+    assert.equal(checks, 2);
+    permitted = false;
+    await client.sources('');
+    await client.arm(null, true);
+    assert.equal(checks, 2, 'Recovery must not be stopped by an excluded or loading picker');
+    assert.equal(capabilityCalls.length, 1, 'Recovery reuses the original creation deadline');
+    assert.equal(posts, 2);
+    assert.strictEqual(calls[1][2], pending.request);
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.session.status, 'closed');
+    await client.disarm();
+    await client.arm({ channelId: 'channel-1' });
+    assert.equal(posts, 2, 'A subsequent new Arm still requires current target access');
+    assert.equal(client.state.error, 'Select an accessible channel before arming.');
     client.dispose();
 });
 

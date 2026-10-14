@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node web/build.mjs",
     "test": "npm run build && node --test test/*.test.mjs",
-    "test:browser": "npm run build && node test/main-path.browser.mjs && node test/new-message.browser.mjs && node test/value-preview.browser.mjs && node test/execution-status.browser.mjs && node test/armed-settings.browser.mjs && node test/options.browser.mjs && node test/source-loading.browser.mjs && node test/arm-recovery.browser.mjs"
+    "test:browser": "npm run build && node test/main-path.browser.mjs && node test/new-message.browser.mjs && node test/value-preview.browser.mjs && node test/execution-status.browser.mjs && node test/armed-settings.browser.mjs && node test/options.browser.mjs && node test/source-loading.browser.mjs && node test/arm-recovery.browser.mjs && node test/channel-access.browser.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.0",

@@ -17,11 +17,21 @@ const React = platform.React;
 const { useCallback, useEffect, useRef, useState } = React;
 const STYLE_ID = "oie-debugger-style";
 const show = (value) => JSON.stringify(value, null, 2);
+const EMPTY_TARGETS = {
+  ready: false,
+  loading: false,
+  channels: [],
+  globalAllowed: false,
+  error: "",
+};
 
 function DebuggerView() {
   const initial = useRef(platform.store.getState("debuggerTarget") || {});
-  const [state, setState] = useState(null),
-    [channels, setChannels] = useState([]);
+  const [state, setState] = useState(null);
+  const [targets, setTargets] = useState({ ...EMPTY_TARGETS, loading: true });
+  const accessRef = useRef(targets),
+    refreshTargets = useRef(null);
+  const { channels } = targets;
   const [channelId, setChannelId] = useState(initial.current.channelId || "");
   const [messageId, setMessageId] = useState(
     String(initial.current.messageId ?? ""),
@@ -49,6 +59,15 @@ function DebuggerView() {
   const [localError, setLocalError] = useState("");
   const clientRef = useRef(null),
     lastPause = useRef("");
+  const selectedId = useRef(channelId);
+  selectedId.current = channelId;
+  const channelAvailable = useCallback((id) => {
+    const access = accessRef.current;
+    return access.ready && (id === "global"
+      ? access.globalAllowed &&
+        clientRef.current?.state.capabilities?.globalAllowed === true
+      : access.channels.some((channel) => channel.id === id));
+  }, []);
   const valid = useCallback(() => !!clientRef.current?.valid(), []);
   const getSession = useCallback(() => {
     const current = clientRef.current?.state;
@@ -58,30 +77,63 @@ function DebuggerView() {
   }, []);
   const context = () => ownerContext(platform.store, document.cookie);
   useEffect(() => {
-    let active = true;
+    let active = true,
+      generation = 0;
+    const publishTargets = (next) => {
+      accessRef.current = next;
+      setTargets(next);
+    };
     const client = new DebuggerClient({
       transport: jsonTransport(platform.api),
       context,
       newId: () => platform.oie.uuid(),
       changed: (next) => active && setState(next),
+      canArm: (id, capabilities) =>
+        selectedId.current === id && channelAvailable(id) &&
+        (id !== "global" || capabilities?.globalAllowed === true),
     });
     clientRef.current = client;
     setState(client.state);
-    client.initialize();
-    platform.api.channels
-      .list()
-      .then((list) => {
-        if (active && client.valid())
-          setChannels(Array.isArray(list) ? list : []);
-      })
-      .catch((e) => {
-        if (active) setLocalError("Cannot load channels: " + e.message);
+    const refresh = async () => {
+      if (!active || !client.valid()) return;
+      const request = ++generation;
+      publishTargets({ ...EMPTY_TARGETS, loading: true });
+      // Refresh both permissions together, and fence older responses without
+      // invalidating an owned session or an uncertain Arm result.
+      const [list, capabilities] = await Promise.allSettled([
+        Promise.resolve().then(() => platform.api.channels.list()),
+        Promise.resolve().then(() => client.api.get("/capabilities")),
+      ]);
+      if (!active || !client.valid() || request !== generation) return;
+      if (capabilities.status === "fulfilled")
+        client.emit({ capabilities: capabilities.value });
+      let failure;
+      if (list.status === "rejected")
+        failure = list.reason || new Error("Channel lookup failed");
+      else if (capabilities.status === "rejected")
+        failure = capabilities.reason || new Error("Capability lookup failed");
+      else if (!Array.isArray(list.value))
+        failure = new Error("Invalid channel list");
+      else if (!capabilities.value || typeof capabilities.value !== "object" ||
+        Array.isArray(capabilities.value))
+        failure = new Error("Invalid debugger capabilities");
+      publishTargets({
+        ready: !failure,
+        loading: false,
+        channels: failure ? [] : list.value,
+        globalAllowed: !failure && capabilities.value.globalAllowed === true,
+        error: failure
+          ? "Cannot load channels: " + (failure.message || String(failure)) : "",
       });
+    };
+    refreshTargets.current = refresh;
+    refresh();
     const invalidate = () => {
+      generation++;
       client.dispose();
       if (active) {
         setState(client.state);
-        setChannels([]);
+        publishTargets(EMPTY_TARGETS);
         setChannelId("");
         setSourceId("");
         setWatchText("");
@@ -99,22 +151,34 @@ function DebuggerView() {
     };
     const unsubscribe = platform.store.subscribe("user", () => {
       if (context() !== client.owner) invalidate();
+      else refresh();
     });
     const expired = platform.api.onSessionExpired(invalidate);
     const unknown = platform.api.onEngineUnknown(invalidate);
     window.addEventListener("oie-session-changed", invalidate);
     window.addEventListener("pagehide", invalidate);
+    window.addEventListener("focus", refresh);
     return () => {
       active = false;
+      generation++;
+      refreshTargets.current = null;
       unsubscribe();
       expired();
       unknown();
       window.removeEventListener("oie-session-changed", invalidate);
       window.removeEventListener("pagehide", invalidate);
+      window.removeEventListener("focus", refresh);
       client.dispose();
     };
   }, []);
+  const targetAllowed = channelAvailable(channelId);
+  // Existing leases retain their source context and recovery controls while
+  // target discovery refreshes; the server reauthorizes every session request.
+  const sourceTarget = state?.session && state.session.status !== "closed"
+    ? state.session.channelId : targetAllowed ? channelId : "";
   const sourceSessionEpoch = clientRef.current?.epoch ?? 0;
+  // A temporary access refresh must not broaden an explicitly selected source
+  // filter. Keep selections until the user chooses a different channel.
   useEffect(() => {
     setSourceId("");
     setTargetSource("");
@@ -123,14 +187,14 @@ function DebuggerView() {
   // Session transitions fence in-flight reads. Replace those reads even when
   // the selection is unchanged or arming fails before an execution can pause.
   useEffect(() => {
-    if (channelId && clientRef.current?.valid())
-      clientRef.current.sources(channelId);
-  }, [channelId, sourceSessionEpoch]);
+    if (clientRef.current?.valid())
+      clientRef.current.sources(sourceTarget);
+  }, [sourceTarget, sourceSessionEpoch]);
   useEffect(() => {
     setAuthoredIndex("");
     if (clientRef.current?.valid())
-      clientRef.current.source(sourceId, channelId);
-  }, [sourceId, channelId, sourceSessionEpoch, state?.session?.id]);
+      clientRef.current.source(sourceTarget ? sourceId : "", sourceTarget);
+  }, [sourceId, sourceTarget, sourceSessionEpoch, state?.session?.id]);
   useEffect(() => {
     if (sourceId || !state?.sources?.length) return;
     const candidate =
@@ -236,9 +300,9 @@ function DebuggerView() {
         sourceId === top.sourceId &&
         !sourceMatchesFrame(client.state.source, top)
       )
-        client.source(top.sourceId, channelId);
+        client.source(top.sourceId, sourceTarget);
     }
-    client.sources(channelId);
+    client.sources(sourceTarget);
   }, [session?.id, session?.pauseGeneration, session?.frames?.length, paused]);
   const selectFrame = (f) => {
     if (client.state.busy || client.state.pending || client.state.lost) return;
@@ -301,10 +365,12 @@ function DebuggerView() {
   });
   const arm = (event) => {
     event.preventDefault();
+    if (!channelAvailable(channelId)) return;
     act(() => client.arm(armOptions()));
   };
   const canArmNewMessage =
     available &&
+    targetAllowed &&
     !controlsBlocked &&
     !!messageId.trim() &&
     ["armed", "running"].includes(session?.status);
@@ -314,6 +380,7 @@ function DebuggerView() {
         current = currentClient?.state;
       if (
         !currentClient?.valid() ||
+        !channelAvailable(channelId) ||
         !current?.capabilities?.available ||
         current.capabilities.controlAllowed === false ||
         current.busy ||
@@ -423,18 +490,13 @@ function DebuggerView() {
             {session.lastError}
           </div>
         )}
-        {!capabilities && !state?.error && (
-          <p role="status" className="dbg-muted">
-            Checking debugger compatibility and access…
-          </p>
-        )}
         {capabilities && !available && (
           <div className="dbg-notice dbg-warning" role="status">
             Debugging is unavailable.{" "}
             {capabilities.reason ||
               capabilities.reasons?.join(" ") ||
               "Check the plugin access policy and engine compatibility."}{" "}
-            <button onClick={() => client.initialize()}>Check again</button>
+            <button onClick={() => refreshTargets.current?.()}>Check again</button>
           </div>
         )}
         {available && capabilities.controlAllowed === false && (
@@ -467,6 +529,20 @@ function DebuggerView() {
             </button>
           </div>
         )}
+        {targets.loading && (
+          <p className="dbg-muted" role="status">Checking channel access…</p>
+        )}
+        {targets.error && (
+          <div className="dbg-notice dbg-error" role="alert">
+            {targets.error}{" "}
+            <button onClick={() => refreshTargets.current?.()}>Retry channels</button>
+          </div>
+        )}
+        {targets.ready && !channels.length && !targets.globalAllowed && (
+          <p className="dbg-muted" role="status">
+            No channels are available to your account.
+          </p>
+        )}
         {session ? (
           <SessionSettings
             state={state}
@@ -486,7 +562,8 @@ function DebuggerView() {
                   Channel
                   <select
                     required
-                    value={channelId}
+                    value={targetAllowed ? channelId : ""}
+                    disabled={!targets.ready}
                     onChange={(e) => setChannelId(e.target.value)}
                   >
                     <option value="">Select a channel</option>
@@ -495,17 +572,9 @@ function DebuggerView() {
                         {c.name || c.id}
                       </option>
                     ))}
-                    {channelId &&
-                      channelId !== "global" &&
-                      !channels.some((c) => c.id === channelId) && (
-                        <option value={channelId}>{channelId}</option>
-                      )}
-                    <option
-                      value="global"
-                      disabled={!capabilities?.globalAllowed}
-                    >
-                      Global scripts
-                    </option>
+                    {targets.ready && targets.globalAllowed && capabilities?.globalAllowed && (
+                      <option value="global">Global scripts</option>
+                    )}
                   </select>
                 </label>
                 <label className="dbg-field">
@@ -622,7 +691,8 @@ function DebuggerView() {
                   <label className="dbg-field">
                     Exact deployed source
                     <select
-                      value={targetSource}
+                      value={targetAllowed ? targetSource : ""}
+                      disabled={!targetAllowed}
                       onChange={(e) => setTargetSource(e.target.value)}
                     >
                       <option value="">Any source in the target</option>
@@ -651,7 +721,7 @@ function DebuggerView() {
                   className="dbg-primary"
                   disabled={
                     capabilities?.controlAllowed === false ||
-                    !channelId ||
+                    !targetAllowed ||
                     (channelId === "global" && !lifecycle)
                   }
                 >
@@ -675,11 +745,14 @@ function DebuggerView() {
         <SendMessage
           channelId={channelId}
           channelName={
-            channels.find((c) => c.id === channelId)?.name || channelId
+            targetAllowed
+              ? channels.find((c) => c.id === channelId)?.name || channelId : ""
           }
           session={session}
           getSession={getSession}
           valid={valid}
+          canSend={() => channelAvailable(channelId)}
+          targetAllowed={targetAllowed}
           disabled={blocked || !available}
           messageFilter={messageId}
           canArmNewMessage={canArmNewMessage}
@@ -691,7 +764,8 @@ function DebuggerView() {
               <label htmlFor="dbg-source">Deployed source</label>
               <select
                 id="dbg-source"
-                value={sourceId}
+                value={sourceTarget ? sourceId : ""}
+                disabled={!sourceTarget}
                 onChange={(e) => setSourceId(e.target.value)}
               >
                 <option value="">Select source</option>
@@ -700,15 +774,15 @@ function DebuggerView() {
                     {s.name} · {s.kind}
                   </option>
                 ))}
-                {sourceId && !state?.sources.some((s) => s.id === sourceId) && (
+                {sourceTarget && sourceId && !state?.sources.some((s) => s.id === sourceId) && (
                   <option value={sourceId}>Paused source</option>
                 )}
               </select>
               <button
-                disabled={!channelId || blocked}
+                disabled={!sourceTarget || blocked}
                 onClick={() => {
-                  client.sources(channelId);
-                  if (sourceId) client.source(sourceId, channelId);
+                  client.sources(sourceTarget);
+                  if (sourceId) client.source(sourceId, sourceTarget);
                 }}
               >
                 Refresh

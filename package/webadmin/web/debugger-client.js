@@ -50,12 +50,13 @@ export function authoredStepLine(source, mapping) {
 
 /** One mounted debugger owns one lease. No tokens or paused data are persisted. */
 export class DebuggerClient {
-    constructor({ transport, context, newId, changed = () => {}, timers = globalThis }) {
+    constructor({ transport, context, newId, changed = () => {}, timers = globalThis, canArm = () => true }) {
         this.api = transport;
         this.context = context;
         this.newId = newId;
         this.changed = changed;
         this.timers = timers;
+        this.canArm = canArm;
         this.tabId = newId();
         this.owner = context();
         this.alive = true;
@@ -76,7 +77,8 @@ export class DebuggerClient {
     }
     async sources(channelId) {
         const epoch = this.epoch, request = ++this.listEpoch;
-        if (this.channelId !== channelId) { this.channelId = channelId; this.sourceEpoch++; this.emit({ sources: [], source: null }); }
+        if (this.channelId !== channelId || !channelId) { this.channelId = channelId; this.sourceEpoch++; this.emit({ sources: [], source: null }); }
+        if (!channelId) return;
         try {
             this.assert();
             const sources = await this.api.get('/sources', { channelId });
@@ -110,6 +112,8 @@ export class DebuggerClient {
         this.emit({ busy: true, lost: false, error: '', receipt: null, pending: null, breakpoints: {}, armOptions: null });
         try {
             if (!request) {
+                if (this.canArm(armOptions.channelId, this.state.capabilities) !== true)
+                    throw new Error('Select an accessible channel before arming.');
                 // The server supplies a short, opaque creation deadline. Reuse it
                 // on every retry so an evicted request can never arm a new lease.
                 const capabilities = await this.api.get('/capabilities');
@@ -119,6 +123,10 @@ export class DebuggerClient {
                     throw new Error(capabilities?.reason || 'Debugger control is unavailable.');
                 if (!Number.isSafeInteger(capabilities.armRequestExpiresAt) || capabilities.commandProtocol !== 2)
                     throw new Error('Reload the debugger after updating the engine plugin.');
+                // Target access may change while the capability request is in flight.
+                // Recovery of an existing request must still reach the server.
+                if (this.canArm(armOptions.channelId, capabilities) !== true)
+                    throw new Error('Select an accessible channel before arming.');
                 request = { ...armOptions, tabId: this.tabId, requestId: this.newId(), requestExpiresAt: capabilities.armRequestExpiresAt };
             }
             const session = await this.api.post('/sessions', request);
