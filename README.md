@@ -2,7 +2,7 @@
 
 Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
-Version 1.0.1 disables debugging by default, reduces idle observation overhead, keeps long sessions usable, and applies channel access restrictions throughout source discovery and the channel picker. See the [release notes](docs/releases/1.0.1.md) for upgrade details.
+Version 1.0.1 disables debugging by default, reduces idle observation overhead, keeps long sessions usable, and applies channel access restrictions throughout source discovery and the channel picker. See the [release notes](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.1) for upgrade details.
 
 ![A sample order paused in the debugger, with its deployed script, variables, and call stack visible](docs/images/debugger-paused.png)
 
