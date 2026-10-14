@@ -6,7 +6,7 @@ const React = platform.React;
 const { useEffect, useRef, useState } = React;
 
 /** Inline submission keeps the mounted debugger and its lease alive. */
-export function SendMessage({ channelId, channelName, session, getSession, valid, disabled = false, messageFilter = '', canArmNewMessage = false, onArmNewMessage }) {
+export function SendMessage({ channelId, channelName, session, getSession, valid, canSend = () => true, targetAllowed = true, disabled = false, messageFilter = '', canArmNewMessage = false, onArmNewMessage }) {
     const [draft, setDraft] = useState('');
     const [state, setState] = useState({ status: 'idle', message: '', messageId: null });
     const [error, setError] = useState('');
@@ -39,11 +39,11 @@ export function SendMessage({ channelId, channelName, session, getSession, valid
 
     const reason = sendUnavailableReason(context.current);
     const sending = state.status === 'sending', unknown = state.status === 'unknown';
-    const locked = disabled || !context.current.valid || !channelId || channelId === 'global' || sending || unknown;
+    const locked = disabled || !targetAllowed || !context.current.valid || !channelId || channelId === 'global' || sending || unknown;
     const submit = async event => {
         event.preventDefault();
         setError('');
-        if (disabled || !sender.current) return;
+        if (disabled || !canSend() || !sender.current) return;
         const instance = sender.current;
         try { await instance.submit(draft); }
         catch (failure) { if (instance.current()) setError(failure.message); }
