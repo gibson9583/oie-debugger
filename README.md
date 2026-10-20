@@ -1,5 +1,7 @@
 # OIE JavaScript Debugger
 
+Release 1.0.2 is being prepared with engine compatibility limited to OIE **4.6.0 and 4.7.0**. Runtime validation on the final 4.7.0 release is pending; see the [release preparation notes](docs/oie-4.6-4.7-release.md).
+
 Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
 Version 1.0.1 disables debugging by default, reduces idle observation overhead, keeps long sessions usable, and applies channel access restrictions throughout source discovery and the channel picker. See the [release notes](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.1) for upgrade details.
