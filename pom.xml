@@ -27,7 +27,7 @@
 
     <properties>
         <!-- Keep release, catalog, and webadmin versions in sync. -->
-        <revision>1.0.1</revision>
+        <revision>1.0.2</revision>
 
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
@@ -38,7 +38,7 @@
         <!-- Engine versions the packaged plugin DECLARES support for
              (plugin.xml <mirthVersion> — the extension loader only loads a
              plugin whose list contains the running engine version). -->
-        <plugin.supported.oie.versions>${mirth.version}</plugin.supported.oie.versions>
+        <plugin.supported.oie.versions>4.6.0,4.7.0</plugin.supported.oie.versions>
         <junit.version>5.10.2</junit.version>
     </properties>
 

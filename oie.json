@@ -19,9 +19,9 @@
         "administrator"
     ],
     "deprecated": false,
-    "version": "1.0.1",
+    "version": "1.0.2",
     "minEngineVersion": "4.6.0",
-    "maxEngineVersion": "4.6.0",
+    "maxEngineVersion": "4.7.0",
     "filename": "oie-debugger-{version}.zip",
     "ui": [
         "web"

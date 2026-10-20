@@ -1,5 +1,7 @@
 # JavaScript Debugger
 
+Engine compatibility for the prepared 1.0.2 release: **OIE 4.6.0 and 4.7.0 only**. See the [release preparation notes](oie-4.6-4.7-release.md) for validation status.
+
 Pause channel JavaScript at breakpoints, step through execution, and inspect variables, maps, and expressions in OIE Web Administrator.
 
 ## Requirements
