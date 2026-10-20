@@ -68,6 +68,13 @@ export class DebuggerClient {
         this.state = { capabilities: null, sources: [], source: null, session: null, armOptions: null, pendingArm: null, error: '', busy: false, lost: false, receipt: null, pending: null, breakpoints: {} };
     }
     emit(patch) { this.state = { ...this.state, ...patch }; if (this.alive) this.changed(this.state); }
+    configurationChanged(capabilities) {
+        this.clearTimers();
+        this.epoch++; this.sourceEpoch++; this.listEpoch++; this.snapshotRevision++;
+        this.commandSequence = 0;
+        this.emit({ capabilities, sources: [], source: null, session: null, armOptions: null,
+            pendingArm: null, pending: null, receipt: null, breakpoints: {}, error: '', busy: false, lost: false });
+    }
     valid(epoch = this.epoch) { return this.alive && epoch === this.epoch && this.owner !== null && this.owner === this.context(); }
     assert() { if (!this.valid()) throw new Error('The engine or login changed. Reopen the debugger.'); }
     async initialize() {

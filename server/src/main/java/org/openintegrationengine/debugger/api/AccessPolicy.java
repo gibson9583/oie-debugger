@@ -15,7 +15,7 @@ public final class AccessPolicy {
     public final boolean evaluationEnabled;
 
     public AccessPolicy(Properties properties) {
-        enabled = Boolean.parseBoolean(properties.getProperty("enabled", "false"));
+        enabled = Boolean.parseBoolean(properties.getProperty("enabled", "true"));
         evaluationEnabled = Boolean.parseBoolean(properties.getProperty("evaluationEnabled", "true"));
         users = values(properties, "allowedUserIds");
         evaluators = values(properties, "evaluationUserIds");
@@ -29,7 +29,8 @@ public final class AccessPolicy {
     private static boolean permits(Set<String> restrictions, int user) {
         return restrictions.isEmpty() || restrictions.contains(Integer.toString(user));
     }
-    public boolean allows(int user) { return enabled && permits(users, user); }
+    public boolean permitsUser(int user) { return permits(users, user); }
+    public boolean allows(int user) { return enabled && permitsUser(user); }
     public boolean evaluates(int user) { return allows(user) && evaluationEnabled && permits(evaluators, user); }
     public boolean global(int user) { return allows(user) && permits(globalUsers, user); }
     public boolean channel(String id) { return id != null && !id.isBlank() && (channels.isEmpty() || channels.contains("*") || channels.contains(id)); }

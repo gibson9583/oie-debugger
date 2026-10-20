@@ -406,7 +406,10 @@ class DebuggerServletTest {
 
     @Test void explicitPluginUserRestrictionStillOverridesPermissiveNativeAuthorization() {
         policy.setProperty("allowedUserIds", "8"); applyPolicy();
-        forbidden(() -> servlet("debuggerCapabilities").capabilities());
+        Map<String, Object> status = body(servlet("debuggerCapabilities").capabilities());
+        assertEquals(false, status.get("userAllowed"));
+        assertEquals(false, status.get("available"));
+        assertFalse(status.containsKey("activeSessions"));
         forbidden(() -> servlet("debuggerSession").session(id, TAB)); assertClosed(id);
     }
 

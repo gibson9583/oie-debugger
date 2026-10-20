@@ -238,7 +238,9 @@ try {
     for (const mode of ['null', 'empty', 'sync', 'reject-null', 'reject-false']) {
         const invalid = await open(`initial=channel-a&capabilities=${mode}`);
         await complete(invalid, 0, ['channel-a']);
-        await expect(invalid.getByRole('alert')).toContainText('Cannot load channels');
+        await expect(invalid.getByRole('alert')).toContainText(
+            ['sync', 'reject-null', 'reject-false'].includes(mode)
+                ? 'Cannot check debugger status' : 'Cannot load channels');
         await expect(channel(invalid)).toHaveValue('');
         await expect(channel(invalid).locator('option[value="channel-a"]')).toHaveCount(0);
         await expect(arm(invalid)).toBeDisabled();

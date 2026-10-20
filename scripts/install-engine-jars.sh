@@ -24,13 +24,14 @@ if [[ -z "${ENGINE_DIR}" || ! -d "${ENGINE_DIR}" ]]; then
     exit 1
 fi
 
-# artifact:candidate-path[:fallback-path...] — the four jars the modules
+# artifact:candidate-path[:fallback-path...] — engine jars used by modules/tests
 # depend on (see the root pom dependencyManagement).
 declare -a JARS=(
     "mirth-server:server-lib/mirth-server.jar:server/setup/server-lib/mirth-server.jar"
     "mirth-client-core:server-lib/mirth-client-core.jar:server/setup/server-lib/mirth-client-core.jar"
     "donkey-server:server-lib/donkey/donkey-server.jar:server/setup/server-lib/donkey/donkey-server.jar:donkey/setup/donkey-server.jar"
     "donkey-model:server-lib/donkey/donkey-model.jar:donkey/setup/donkey-model.jar:server/setup/server-lib/donkey/donkey-model.jar"
+    "mirth-crypto:server-lib/mirth-crypto.jar:server/setup/server-lib/mirth-crypto.jar"
 )
 
 resolve_jar() {

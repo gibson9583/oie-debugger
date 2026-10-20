@@ -12,8 +12,8 @@ class AccessPolicyTest {
         return properties;
     }
 
-    @Test void missingEnabledPropertyDefaultsOff() {
-        assertFalse(new AccessPolicy(new Properties()).enabled);
+    @Test void missingEnabledPropertyDefaultsOn() {
+        assertTrue(new AccessPolicy(new Properties()).enabled);
     }
 
     @Test void absentRestrictionsDeferAllCapabilitiesToNativeEngineAuthorization() {
@@ -33,8 +33,8 @@ class AccessPolicyTest {
 
     @Test void shippedDefaultsEnableEvaluationSubjectToNativePermission() {
         Properties properties = new DebuggerPlugin().getDefaultProperties();
-        assertEquals("false", properties.getProperty("enabled"));
-        assertFalse(new AccessPolicy(properties).allows(7));
+        assertEquals("true", properties.getProperty("enabled"));
+        assertTrue(new AccessPolicy(properties).allows(7));
         assertEquals("true", properties.getProperty("evaluationEnabled"));
         properties.setProperty("enabled", "true");
         AccessPolicy policy = new AccessPolicy(properties);

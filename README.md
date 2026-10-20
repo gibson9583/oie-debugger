@@ -1,10 +1,10 @@
 # OIE JavaScript Debugger
 
-Release 1.0.2 is being prepared with engine compatibility limited to OIE **4.6.0 and 4.7.0**. Runtime validation on the final 4.7.0 release is pending; see the [release preparation notes](docs/oie-4.6-4.7-release.md).
+Version **1.0.3** supports OIE **4.6.0 and 4.7.0**. See [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.3) for the signed ZIP and release notes.
 
 Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
-Version 1.0.1 disables debugging by default, reduces idle observation overhead, keeps long sessions usable, and applies channel access restrictions throughout source discovery and the channel picker. See the [release notes](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.1) for upgrade details.
+Version 1.0.3 enables debugging by default and adds an engine-wide **Enable debugger / Disable debugger** control to the debugger screen. Arming still selects the executions that may pause. Explicit saved settings remain in effect on upgrade.
 
 ![A sample order paused in the debugger, with its deployed script, variables, and call stack visible](docs/images/debugger-paused.png)
 
@@ -22,17 +22,17 @@ Version 1.0.1 disables debugging by default, reduces idle observation overhead, 
 
 ## Install
 
-Use Java 17 or newer, **OIE 4.6.0**, and **Web Administrator with plugin API 4.7 or newer**. Web Administrator 1.0.1 provides this API. The engine also needs web-support endpoints, supplied by the [Web Support extension](https://github.com/gibson9583/oie-web-support-plugin).
+Use Java 17 or newer, **OIE 4.6.0 or 4.7.0**, and **Web Administrator with plugin API 4.7 or newer**. Web Administrator 1.0.1 provides this API. The engine also needs web-support endpoints, supplied by the [Web Support extension](https://github.com/gibson9583/oie-web-support-plugin).
 
-1. Download [oie-debugger-1.0.1.zip](https://github.com/gibson9583/oie-debugger/releases/download/v1.0.1/oie-debugger-1.0.1.zip) from the [signed 1.0.1 release](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.1).
+1. Download the debugger ZIP from [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases).
 2. Install the ZIP through the engine's extension installer.
 3. Restart the engine, then reload Web Administrator.
-4. In the **JavaScript Debugger** extension properties, set `enabled=true`, then redeploy the channels you want to debug.
-5. Open **Monitor → Debugger**.
+4. Open **Monitor → Debugger**. If an earlier installation saved debugging as disabled, choose **Enable debugger**. The control is at the left of the execution buttons and requires **Manage Extensions** permission.
+5. Deploy or redeploy the channels you want to debug.
 
-The debugger is disabled by default. Enabling it adds JavaScript observation across the engine, including channels without an armed session. Idle observation reuses scope observers and avoids repeated source-registry locking, but still has a cost. Set `enabled=false` when finished debugging, especially on a shared or production engine. User and channel access restrictions do not limit where observation hooks run.
+The debugger is enabled by default. Enabling it adds JavaScript observation across the engine, including channels without an armed session. Idle observation reuses scope observers and avoids repeated source-registry locking, but still has a cost. Choose **Disable debugger** to stop observation and release paused executions across the engine. User and channel access restrictions do not limit where observation hooks run.
 
-After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` settings remain enabled on upgrade.
+After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` and `enabled=false` settings remain in effect on upgrade.
 
 The engine's JavaScript setting is `rhino.optimizationlevel=-1`. This is the default when the property is absent from `conf/mirth.properties`. If the property is already present, set its value to `-1` before restarting.
 
@@ -57,6 +57,6 @@ Set **Maximum pause (seconds)** to choose a pause duration from 1 to 120 seconds
 
 The [usage wiki](https://github.com/gibson9583/oie-debugger/wiki) includes installation, a sample channel, sending messages, breakpoints, stepping, inspecting values, permissions, and session recovery. You can also read the [guide in this repository](docs/wiki/Home.md).
 
-Users need **View JavaScript Debugger** to read sources, **Control JavaScript Debugger** to run a session, **Evaluate JavaScript Debugger** to use expression features, and **Send Message** to send a sample. Channel permissions and the debugger's extension properties let administrators choose who can debug each channel. See [Access and settings](https://github.com/gibson9583/oie-debugger/wiki/Access-and-settings) for setup steps.
+Users need **Manage Extensions** to enable or disable debugging engine-wide, **View JavaScript Debugger** to read sources, **Control JavaScript Debugger** to run a session, **Evaluate JavaScript Debugger** to use expression features, and **Send Message** to send a sample. Channel permissions and the debugger's extension properties let administrators choose who can debug each channel. See [Access and settings](https://github.com/gibson9583/oie-debugger/wiki/Access-and-settings) for setup steps.
 
 Licensed under the [Mozilla Public License 2.0](LICENSE).

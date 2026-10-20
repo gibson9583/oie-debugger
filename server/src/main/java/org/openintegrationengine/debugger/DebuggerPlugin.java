@@ -6,6 +6,7 @@ import com.mirth.connect.model.ServerEventContext;
 import com.mirth.connect.plugins.ChannelPlugin;
 import com.mirth.connect.plugins.ServicePlugin;
 import com.mirth.connect.server.controllers.ControllerFactory;
+import com.mirth.connect.server.controllers.ConfigurationController;
 import com.mirth.connect.server.controllers.EventController;
 
 import org.openintegrationengine.debugger.api.AccessPolicy;
@@ -22,6 +23,7 @@ public final class DebuggerPlugin implements ServicePlugin, ChannelPlugin {
     private static volatile AccessPolicy policy = new AccessPolicy(new Properties());
     private static volatile String unavailable = "Debugger plugin has not started";
     private DebugLifecycleListener listener;
+    private AccessPolicy appliedPolicy;
 
     public static AccessPolicy policy() {
         return policy;
@@ -57,6 +59,35 @@ public final class DebuggerPlugin implements ServicePlugin, ChannelPlugin {
                     .closeAll("Debugger access policy changed; arm a new session");
         DebugRuntime.getInstance().setAttachmentGuard(EngineCompatibility::canAttach);
         DebugRuntime.getInstance().configure(updated.enabled, updated.evaluationEnabled);
+        appliedPolicy = updated;
+    }
+
+    /** Change only the enable flag; never write a render-time copy of access restrictions. */
+    public synchronized boolean setEnabled(ConfigurationController settings, boolean enabled) {
+        String value = Boolean.toString(enabled);
+        try {
+            Properties current = settings.getPropertiesForGroup(getPluginPointName());
+            if (current != null && value.equals(current.getProperty("enabled"))
+                    && policy == appliedPolicy && policy.enabled == enabled
+                    && Boolean.valueOf(enabled).equals(DebugRuntime.getInstance().status().get("enabled")))
+                return false;
+            settings.saveProperty(getPluginPointName(), "enabled", value);
+            Properties saved = settings.getPropertiesForGroup(getPluginPointName());
+            // Stock engines can log persistence errors instead of throwing them.
+            // Require a read-back before reporting success or changing runtime access.
+            if (saved == null || !value.equals(saved.getProperty("enabled")))
+                throw new IllegalStateException("Debugger setting could not be read back");
+            configure(saved, true);
+            return true;
+        } catch (RuntimeException failure) {
+            throw new SettingWriteException(failure);
+        }
+    }
+
+    public static final class SettingWriteException extends RuntimeException {
+        SettingWriteException(Throwable cause) {
+            super("Could not save the debugger setting. Refresh its status and retry.", cause);
+        }
     }
 
     @Override
@@ -109,7 +140,7 @@ public final class DebuggerPlugin implements ServicePlugin, ChannelPlugin {
     @Override
     public Properties getDefaultProperties() {
         Properties p = new Properties();
-        p.setProperty("enabled", "false");
+        p.setProperty("enabled", "true");
         p.setProperty("allowedUserIds", "");
         p.setProperty("allowedChannelIds", "");
         p.setProperty("evaluationEnabled", "true");
@@ -127,6 +158,7 @@ public final class DebuggerPlugin implements ServicePlugin, ChannelPlugin {
                     "Read permitted debugger sources and owned sessions",
                     new String[] {
                         "debuggerCapabilities",
+                        "debuggerSetEnabled",
                         "debuggerSources",
                         "debuggerSource",
                         "debuggerSession"

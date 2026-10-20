@@ -6,7 +6,7 @@ Install the debugger, prepare a small test channel, and open your first session.
 
 Use this setup:
 
-- Open Integration Engine **4.6.0** running **Java 17 or newer**.
+- Open Integration Engine **4.6.0 or 4.7.0** running **Java 17 or newer**.
 - Web Administrator with **plugin API 4.7 or newer**.
 - Plugin discovery provided by the engine's native web-support endpoints or the **Web Support** extension.
 
@@ -21,7 +21,7 @@ The debugger uses Rhino's interpreted mode. OIE uses the required setting by def
 rhino.optimizationlevel=-1
 ```
 
-Restart the engine after changing that property. The debugger defaults to disabled: set `enabled=true` in the **JavaScript Debugger** extension properties, then deploy your test channel so its JavaScript is ready to inspect. For an existing channel that was compiled while the debugger was disabled, redeploy it before starting the walkthrough. Set `enabled=false` when debugging is finished to remove observation overhead from subsequent executions.
+Restart the engine after changing that property. The debugger defaults to enabled. If a previous installation saved it as disabled, use **Enable debugger** at the left of the execution buttons in **Monitor → Debugger** with **Manage Extensions** permission. Deploy your test channel so its JavaScript is ready to inspect. For an existing channel that was compiled while the debugger was disabled, redeploy it before starting the walkthrough. Use **Disable debugger** to stop observation and release paused executions across the engine.
 
 ## Check your permissions
 

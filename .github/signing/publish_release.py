@@ -9,7 +9,7 @@ import subprocess
 from urllib.parse import quote
 
 
-BODY = """The ZIP contains the complete JavaScript Debugger extension for OIE 4.6.0,
+BODY = """The ZIP contains the complete JavaScript Debugger extension for OIE 4.6.0 and 4.7.0,
 including its Web Administrator interface (plugin API 4.7 or newer).
 
 Both plugin JARs are signed with SSL.com eSigner and verified before publication.

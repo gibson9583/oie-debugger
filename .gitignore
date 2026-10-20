@@ -18,6 +18,7 @@ __pycache__/
 
 # Keep machine-specific validation evidence outside the repository
 /test-results/
+/validation/
 /docs/deployments/
 /docs/screenshots/evidence/
 /docs/screenshots/usability/evidence/

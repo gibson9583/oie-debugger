@@ -146,18 +146,40 @@ class EngineRun:
         self.request("POST", "/extensions/_install", payload, f"multipart/form-data; boundary={boundary}")
 
     def configure(self, enabled):
-        properties = f'<properties><property name="enabled">{str(enabled).lower()}</property></properties>'
-        self.request("PUT", "/extensions/JavaScript%20Debugger/properties?mergeProperties=true", properties, "application/xml")
+        result = self.request("PUT", "/extensions/debugger/enabled", {"enabled": enabled})
+        assert result["configuredEnabled"] is enabled, result
 
     def deploy(self, channel):
         channel_id = channel.findtext("id")
         self.request("PUT", f"/channels/{channel_id}?override=true", ET.tostring(channel, encoding="unicode"), "application/xml")
         self.request("POST", f"/channels/{channel_id}/_deploy?returnErrors=true")
 
+    def verify_setting_requests(self, channel_id):
+        # Exercise the actual engine route/serialization, not a manufactured response.
+        for body in [{}, {"enabled": "false"}, {"enabled": None},
+                {"enabled": False, "allowedUserIds": ""}]:
+            try:
+                self.request("PUT", "/extensions/debugger/enabled", body)
+            except urllib.error.HTTPError as error:
+                assert error.code == 400, error
+            else:
+                raise AssertionError("Invalid enable request was accepted")
+        caps = self.request("GET", "/extensions/debugger/capabilities")
+        options = {"channelId": channel_id, "tabId": "setting-audit",
+                "requestId": str(uuid.uuid4()), "requestExpiresAt": caps["armRequestExpiresAt"]}
+        session = self.request("POST", "/extensions/debugger/sessions", options)
+        repeated = self.request("PUT", "/extensions/debugger/enabled", {"enabled": True})
+        assert repeated["configurationChanged"] is False, repeated
+        current = self.request("GET", f'/extensions/debugger/sessions/{session["id"]}?tabId=setting-audit')
+        assert current["status"] == "armed", current
+        self.request("DELETE", f'/extensions/debugger/sessions/{session["id"]}?tabId=setting-audit')
+        self.save("setting-request-verification.json", {"passed": True,
+                "malformedRequestsRejected": 4, "repeatedSettingPreservesArmedSession": True})
+
     def browser(self, channel_id, name):
         output = self.output / name
         output.mkdir()
-        if self.starts > 2 or name != "browser":
+        if name != "browser":
             (output / "onboarding-complete").write_text("done")
         connection = {"baseUrl": self.url, "webadminUrl": self.url + "/oie-webadmin/",
                 "channelId": channel_id, "attempt": str(output)}
@@ -268,7 +290,14 @@ class EngineRun:
         self.stop()
         self.start()
         settings = self.request("GET", "/extensions/JavaScript%20Debugger/properties", accept="application/xml")
-        assert ET.fromstring(settings).find(".//property[@name='enabled']").text == "false", settings
+        assert ET.fromstring(settings).find(".//property[@name='enabled']").text == "true", settings
+        self.configure(False)
+        self.stop()
+        self.start()
+        disabled = self.request("GET", "/extensions/debugger/capabilities")
+        assert disabled["configuredEnabled"] is False and disabled["managementAllowed"], disabled
+        assert not disabled["available"], disabled
+        self.save("disabled-after-restart.json", disabled)
         self.configure(True)
         capabilities = self.request("GET", "/extensions/debugger/capabilities")
         assert capabilities["available"] and capabilities["commandProtocol"] == 2, capabilities
@@ -276,6 +305,7 @@ class EngineRun:
         channel = ET.parse(REPO / "scripts/engine/demo-channel.xml").getroot()
         channel.find("id").text = str(uuid.uuid4())
         self.deploy(channel)
+        self.verify_setting_requests(channel.findtext("id"))
         self.browser(channel.findtext("id"), "browser")
         self.configure(False)
         self.configure(True)

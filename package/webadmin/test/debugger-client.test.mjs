@@ -1114,3 +1114,36 @@ test('a server without the sequence protocol cannot create a new lease', async (
     assert.equal(calls.length, 0);
     client.dispose();
 });
+
+test('a global setting change fences pending reads and stops old session timers', async () => {
+    const late = deferred();
+    const {client, scheduled} = fixture({get:()=>late.promise});
+    await client.arm({channelId:'channel-1'});
+    const pending=client.source('old-source','channel-1');
+    const capabilities={configuredEnabled:false,available:false};
+    client.configurationChanged(capabilities);
+    late.resolve({id:'old-source'});await pending;
+    assert.equal(client.state.session,null);
+    assert.equal(client.state.source,null);
+    assert.equal(client.state.pendingArm,null);
+    assert.equal(client.state.capabilities,capabilities);
+    assert.equal(scheduled.size,0);
+    client.dispose();
+});
+
+test('disabling while Arm is in flight fences its reply and never renews its lease', async () => {
+    const reply = deferred();
+    const { client, calls, heartbeatCalls, scheduled } = fixture({ post: () => reply.promise });
+    const arming = client.arm({ channelId: 'channel-1' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls[0][1], '/sessions');
+    client.configurationChanged({ configuredEnabled: false, available: false });
+    reply.resolve(session());
+    await arming;
+    assert.equal(client.state.session, null);
+    assert.equal(client.state.pendingArm, null);
+    assert.equal(client.state.busy, false);
+    assert.equal(heartbeatCalls.length, 0);
+    assert.equal(scheduled.size, 0);
+    client.dispose();
+});

@@ -34,7 +34,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/engine-inputs"
           tar -xzf "$RUNNER_TEMP/oie.tar.gz" -C "$RUNNER_TEMP/engine-inputs" \
             oie/server-lib/mirth-server.jar oie/server-lib/mirth-client-core.jar \
-            oie/server-lib/donkey/donkey-model.jar oie/server-lib/donkey/donkey-server.jar
+            oie/server-lib/donkey/donkey-model.jar oie/server-lib/donkey/donkey-server.jar \
+            oie/server-lib/mirth-crypto.jar
           ENGINE_DIR="$RUNNER_TEMP/engine-inputs/oie" bash scripts/install-engine-jars.sh
           rm -rf "$RUNNER_TEMP/engine-inputs"
       - name: Build package and run JVM and JavaScript tests

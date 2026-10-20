@@ -57,6 +57,9 @@ function DebuggerView() {
     [name, setName] = useState(""),
     [valueExpression, setValueExpression] = useState("");
   const [localError, setLocalError] = useState("");
+  const [settingBusy, setSettingBusy] = useState(false);
+  const [settingError, setSettingError] = useState("");
+  const settingBusyRef = useRef(false), changeEnabled = useRef(null);
   const clientRef = useRef(null),
     lastPause = useRef("");
   const selectedId = useRef(channelId);
@@ -89,13 +92,13 @@ function DebuggerView() {
       newId: () => platform.oie.uuid(),
       changed: (next) => active && setState(next),
       canArm: (id, capabilities) =>
-        selectedId.current === id && channelAvailable(id) &&
+        !settingBusyRef.current && selectedId.current === id && channelAvailable(id) &&
         (id !== "global" || capabilities?.globalAllowed === true),
     });
     clientRef.current = client;
     setState(client.state);
     const refresh = async () => {
-      if (!active || !client.valid()) return;
+      if (!active || !client.valid() || settingBusyRef.current) return;
       const request = ++generation;
       publishTargets({ ...EMPTY_TARGETS, loading: true });
       // Refresh both permissions together, and fence older responses without
@@ -105,8 +108,11 @@ function DebuggerView() {
         Promise.resolve().then(() => client.api.get("/capabilities")),
       ]);
       if (!active || !client.valid() || request !== generation) return;
-      if (capabilities.status === "fulfilled")
-        client.emit({ capabilities: capabilities.value });
+      if (capabilities.status === "fulfilled") {
+        if (capabilities.value?.configuredEnabled === false)
+          client.configurationChanged(capabilities.value);
+        else client.emit({ capabilities: capabilities.value });
+      }
       let failure;
       if (list.status === "rejected")
         failure = list.reason || new Error("Channel lookup failed");
@@ -117,16 +123,42 @@ function DebuggerView() {
       else if (!capabilities.value || typeof capabilities.value !== "object" ||
         Array.isArray(capabilities.value))
         failure = new Error("Invalid debugger capabilities");
+      const discoverable = !failure && capabilities.value.available === true;
       publishTargets({
-        ready: !failure,
+        ready: discoverable,
         loading: false,
-        channels: failure ? [] : list.value,
-        globalAllowed: !failure && capabilities.value.globalAllowed === true,
+        channels: discoverable ? list.value : [],
+        globalAllowed: discoverable && capabilities.value.globalAllowed === true,
         error: failure
-          ? "Cannot load channels: " + (failure.message || String(failure)) : "",
+          ? (capabilities.status === "rejected" ? "Cannot check debugger status: " : "Cannot load channels: ") +
+            (failure.message || String(failure)) : "",
       });
     };
     refreshTargets.current = refresh;
+    changeEnabled.current = async (enabled) => {
+      if (!active || !client.valid() || settingBusyRef.current) return;
+      settingBusyRef.current = true;
+      generation++;
+      setSettingBusy(true);
+      setSettingError("");
+      try {
+        const result = await client.api.put("/enabled", { enabled });
+        if (!active || !client.valid()) return;
+        if (result?.configuredEnabled !== enabled)
+          throw new Error("The engine did not confirm the requested setting.");
+        if (result.configurationChanged) client.configurationChanged(result);
+        else client.emit({ capabilities: result });
+      } catch (error) {
+        if (active && client.valid())
+          setSettingError("Could not confirm the debugger setting. " + error.message);
+      } finally {
+        settingBusyRef.current = false;
+        if (active && client.valid()) {
+          setSettingBusy(false);
+          await refresh();
+        }
+      }
+    };
     refresh();
     const invalidate = () => {
       generation++;
@@ -147,6 +179,8 @@ function DebuggerView() {
         setLocalError(
           "The login or engine changed. Reopen the debugger to create a new session.",
         );
+        setSettingBusy(false);
+        setSettingError("");
       }
     };
     const unsubscribe = platform.store.subscribe("user", () => {
@@ -162,6 +196,7 @@ function DebuggerView() {
       active = false;
       generation++;
       refreshTargets.current = null;
+      changeEnabled.current = null;
       unsubscribe();
       expired();
       unknown();
@@ -212,7 +247,7 @@ function DebuggerView() {
     closed = session?.status === "closed";
   const activeSession = !!session && !closed;
   const client = clientRef.current;
-  const blocked = !client?.valid() || !!state?.busy || !!state?.lost;
+  const blocked = settingBusy || !client?.valid() || !!state?.busy || !!state?.lost;
   const controlsBlocked =
     blocked ||
     !!state?.pending ||
@@ -248,10 +283,13 @@ function DebuggerView() {
   ]);
   const breakpoints = source ? state?.breakpoints[source.id] || [] : [];
   const capabilities = state?.capabilities;
+  const configuredEnabled = capabilities?.configuredEnabled ?? capabilities?.enabled ?? capabilities?.available;
   const available =
     capabilities?.available === true && capabilities.apiVersion === 1;
   const evaluationUnavailable =
-    capabilities?.evaluationEnabled === false
+    configuredEnabled === false
+      ? "Enable debugging to use evaluation tools."
+      : capabilities?.evaluationEnabled === false
       ? "Evaluation is disabled in the engine settings."
       : capabilities?.evaluationAllowed === false
         ? "Evaluation is not available for your account."
@@ -426,10 +464,16 @@ function DebuggerView() {
               state?.lost ? "disconnected" : session?.status || "idle"
             }
           >
-            {state?.lost ? "Disconnected" : session?.status || "Not armed"}
+            {configuredEnabled === false ? "Disabled" : state?.lost ? "Disconnected" : session?.status || "Not armed"}
           </span>
         </div>
         <div className="dbg-row">
+          {capabilities?.managementAllowed === true && <button
+            type="button"
+            className={configuredEnabled === false ? "dbg-primary" : undefined}
+            disabled={settingBusy || !client?.valid()}
+            onClick={() => changeEnabled.current?.(!configuredEnabled)}
+          >{settingBusy ? "Saving…" : configuredEnabled ? "Disable debugger" : "Enable debugger"}</button>}
           <button
             disabled={!paused || controlsBlocked}
             onClick={() => command("continue")}
@@ -480,6 +524,18 @@ function DebuggerView() {
         aria-label="Debugger content"
         tabIndex={0}
       >
+        <section className="dbg-enable" aria-label="Engine-wide debugging">
+          <div>
+            <strong role="status">{configuredEnabled === undefined ? "Checking debugging status…" :
+              configuredEnabled ? "Debugging enabled" : "Debugging disabled"}</strong>
+            <p className="dbg-muted">{configuredEnabled === false
+              ? "Enable debugging to choose a channel and arm a session."
+              : "Arming selects executions that may pause. Disabling stops debugging engine-wide and releases paused executions."}</p>
+            {configuredEnabled === true && <p className="dbg-muted">After enabling, redeploy the channels you want to debug.</p>}
+            {capabilities?.managementAllowed === false && <p className="dbg-muted">Manage Extensions permission is required to change this setting.</p>}
+          </div>
+        </section>
+        {settingError && <div className="dbg-notice dbg-error" role="alert">{settingError}</div>}
         {(localError || state?.error) && (
           <div className="dbg-notice dbg-error" role="alert">
             {localError || state.error}
@@ -490,7 +546,7 @@ function DebuggerView() {
             {session.lastError}
           </div>
         )}
-        {capabilities && !available && (
+        {capabilities && !available && configuredEnabled !== false && (
           <div className="dbg-notice dbg-warning" role="status">
             Debugging is unavailable.{" "}
             {capabilities.reason ||
@@ -991,7 +1047,7 @@ function DebuggerView() {
                 {capabilities?.evaluationEnabled === false
                   ? "Evaluation is disabled in the engine settings."
                   : capabilities?.evaluationAllowed === false
-                    ? "Evaluation is not available for your account."
+                    ? evaluationUnavailable || "Evaluation is not available for your account."
                     : "Enable evaluation before arming to add watches or run expressions."}
               </p>
             ) : (

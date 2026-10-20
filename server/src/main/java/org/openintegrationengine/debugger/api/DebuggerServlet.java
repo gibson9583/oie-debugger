@@ -3,6 +3,7 @@ package org.openintegrationengine.debugger.api;
 import com.mirth.connect.client.core.Operation;
 import com.mirth.connect.client.core.Operation.ExecuteType;
 import com.mirth.connect.client.core.api.Param;
+import com.mirth.connect.client.core.api.servlets.ExtensionServletInterface;
 import com.mirth.connect.model.ServerEvent.Outcome;
 import com.mirth.connect.server.api.DontCheckAuthorized;
 import com.mirth.connect.server.api.MirthServlet;
@@ -117,6 +118,21 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
         }
     }
 
+    private boolean managementAllowed() {
+        Operation original = operation;
+        try {
+            // The built-in operation must not be wrapped as a debugger ExtensionOperation.
+            operation = new Operation(ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_SET,
+                    "Set plugin properties", ExecuteType.ASYNC, false);
+            parameterMap.put("extensionName", PLUGIN_POINT);
+            return isUserAuthorized(false);
+        } catch (RuntimeException denied) {
+            return false;
+        } finally {
+            operation = original;
+        }
+    }
+
     private boolean globalAllowed() {
         if (!DebuggerPlugin.policy().global(getCurrentUserId())
                 || !permitsOperation("debuggerCommand")) return false;
@@ -189,6 +205,8 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
                             e.requestId()));
         } catch (SecurityException e) {
             return failure(403, e.getMessage());
+        } catch (DebuggerPlugin.SettingWriteException e) {
+            return failure(500, e.getMessage());
         } catch (IllegalArgumentException e) {
             return failure(400, e.getMessage());
         } catch (IllegalStateException e) {
@@ -224,29 +242,62 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
 
     @Override
     public Response capabilities() {
-        return json(
-                () -> {
-                    access();
-                    Map<String, Object> result = new LinkedHashMap<>(runtime.status());
-                    String unavailable = DebuggerPlugin.unavailableReason();
-                    if (Boolean.TRUE.equals(result.get("debuggerConflict")))
-                        unavailable =
-                                "Another Rhino debugger owns an observed context; resolve the"
-                                    + " conflict and restart the plugin";
-                    if (!Boolean.TRUE.equals(result.get("enabled")) && unavailable == null)
-                        unavailable = "Debugger runtime is disabled";
-                    result.put("available", unavailable == null);
-                    result.put("reason", unavailable);
-                    result.put("apiVersion", 1);
-                    result.put("controlAllowed", permitsOperation("debuggerCommand"));
-                    result.put(
-                            "evaluationAllowed",
-                            DebuggerPlugin.policy().evaluates(getCurrentUserId())
-                                    && permitsOperation("debuggerEvaluate"));
-                    result.put("globalAllowed", globalAllowed());
-                    result.put("sourceMode", "compiled-generated");
-                    return result;
-                });
+        return json(() -> {
+            checkUserAuthorized();
+            return capabilitiesData();
+        });
+    }
+
+    private Map<String, Object> capabilitiesData() {
+        AccessPolicy policy = DebuggerPlugin.policy();
+        boolean userAllowed = policy.permitsUser(getCurrentUserId());
+        Map<String, Object> result = new LinkedHashMap<>(runtime.status());
+        // Excluded users can see the setting, but cannot inspect runtime diagnostics.
+        if (!userAllowed) result.clear();
+        String unavailable = DebuggerPlugin.unavailableReason();
+        if (!userAllowed) unavailable = "Your account is excluded by the debugger's installation settings.";
+        if (Boolean.TRUE.equals(result.get("debuggerConflict")))
+            unavailable =
+                    "Another Rhino debugger owns an observed context; resolve the"
+                        + " conflict and restart the plugin";
+        if (!Boolean.TRUE.equals(result.get("enabled")) && unavailable == null)
+            unavailable = "Debugger runtime is disabled";
+        result.put("available", unavailable == null);
+        result.put("configuredEnabled", policy.enabled);
+        result.put("userAllowed", userAllowed);
+        result.put("managementAllowed", managementAllowed());
+        result.put("reason", unavailable);
+        result.put("apiVersion", 1);
+        result.put("controlAllowed", policy.enabled && userAllowed && permitsOperation("debuggerCommand"));
+        result.put(
+                "evaluationAllowed",
+                DebuggerPlugin.policy().evaluates(getCurrentUserId())
+                        && permitsOperation("debuggerEvaluate"));
+        result.put("globalAllowed", globalAllowed());
+        result.put("sourceMode", "compiled-generated");
+        return result;
+    }
+
+    @Override
+    @DontCheckAuthorized
+    public Response setEnabled(@Param(value="body", excludeFromAudit=true) String body) {
+        return json(() -> {
+            checkUserAuthorized();
+            parameterMap.put("extensionName", PLUGIN_POINT);
+            if (!managementAllowed())
+                throw new SecurityException("Manage Extensions permission is required to enable or disable debugging");
+            Map<String, Object> input = Json.read(body);
+            if (input.size() != 1 || !(input.get("enabled") instanceof Boolean enabled))
+                throw new IllegalArgumentException("Provide only an enabled boolean");
+            parameterMap.put("enabled", enabled);
+            var plugin = controllerFactory.createExtensionController().getServicePlugins().get(PLUGIN_POINT);
+            if (!(plugin instanceof DebuggerPlugin debugger))
+                throw new IllegalStateException("The debugger service is not running");
+            boolean changed = debugger.setEnabled(controllerFactory.createConfigurationController(), enabled);
+            Map<String, Object> result = capabilitiesData();
+            result.put("configurationChanged", changed);
+            return result;
+        });
     }
 
     private boolean currentSource(Map<String, Object> source) {

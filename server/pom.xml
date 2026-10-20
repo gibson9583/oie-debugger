@@ -22,6 +22,9 @@
         <dependency><groupId>com.thoughtworks.xstream</groupId><artifactId>xstream</artifactId><version>1.4.21</version><scope>provided</scope></dependency>
         <dependency><groupId>org.glassfish.jersey.core</groupId><artifactId>jersey-common</artifactId><version>2.35</version><scope>test</scope></dependency>
         <dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><version>5.14.2</version><scope>test</scope></dependency>
+        <dependency><groupId>org.apache.commons</groupId><artifactId>commons-configuration2</artifactId><version>2.8.0</version><scope>test</scope></dependency>
+        <!-- ConfigurationController's public signature references the engine crypto API. -->
+        <dependency><groupId>com.mirth.connect</groupId><artifactId>mirth-crypto</artifactId><version>${mirth.version}</version><scope>test</scope></dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

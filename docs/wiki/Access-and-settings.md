@@ -2,7 +2,7 @@
 
 Engine permissions determine which debugger tools a user can open and use. Extension properties provide an additional way to select the users and channels that participate in debugging.
 
-These settings describe version 1.0.1. When upgrading from 1.0.0, reload Web Administrator to use the current command-retry protocol. Explicitly saved enabled settings remain in effect.
+These settings describe version 1.0.3. When upgrading from 1.0.0, reload Web Administrator to use the current command-retry protocol. Explicitly saved enabled or disabled settings remain in effect.
 
 ## Grant the required permissions
 
@@ -13,6 +13,7 @@ Use the engine's permission management to assign:
 | **View JavaScript Debugger** | Opening the debugger and reading deployed sources for permitted channels. |
 | **Control JavaScript Debugger** | Arming and managing the user's own debug sessions, pausing, stepping, inspecting paused values, and setting breakpoints. |
 | **Evaluate JavaScript Debugger** | Expression evaluation, watches, conditional breakpoints, and local value editing. |
+| **Manage Extensions** | Enabling or disabling debugging across the engine from the debugger screen. |
 | **Send Message** | Submitting a message through **Send a message**. |
 
 Give a debugging user View and Control, plus access to the channels they will work on. Add Evaluate for expression tools, and Send Message for the built-in sender. Existing engine channel permissions continue to determine channel access.
@@ -21,11 +22,13 @@ Expression tools also use the session's **Enable evaluation and value editing** 
 
 ## Configure the extension
 
-Open the **JavaScript Debugger** extension properties in the engine's extension settings.
+Debugging is enabled by default on a new installation. Use **Enable debugger / Disable debugger** at the left of the execution buttons at the top of **Monitor → Debugger**. This changes the persisted engine-wide setting through `PUT /api/extensions/debugger/enabled` with JSON `{"enabled":true}` or `{"enabled":false}`. It requires both **View JavaScript Debugger** and **Manage Extensions** permissions, which the server rechecks on every request. Disabling immediately closes all debug sessions and releases paused executions. Repeated requests for the current state preserve active sessions.
+
+The endpoint changes only `enabled`; existing user/channel restrictions and other extension properties remain intact. The extension properties remain available through the engine's extension settings/API.
 
 | Property | How to use it |
 | --- | --- |
-| `enabled` | Set to `true` to enable JavaScript observation and debugging. Default: `false`. Redeploy target channels after enabling. |
+| `enabled` | Set to `true` to enable JavaScript observation and debugging. Default: `true`. Redeploy target channels after enabling. |
 | `evaluationEnabled` | Set to `true` to make expression tools available to users with Evaluate permission. Default: `true`. |
 | `allowedUserIds` | Enter comma-separated numeric engine user IDs to select users, for example `7,12`. |
 | `allowedChannelIds` | Enter comma-separated channel IDs to select channels. Use `*` to include all channels allowed by the user's engine permissions. |
@@ -38,9 +41,9 @@ For example, `allowedUserIds=7,12` together with `evaluationUserIds=7` allows bo
 
 After saving access-property changes, arm a fresh session to use the updated settings.
 
-Enabling the debugger adds observation hooks across the engine, even without an armed session. Idle observation reuses scope observers and avoids repeated source-registry locking, but observation and active debugging still add processing cost. User and channel restrictions control access; they do not remove hooks from other channels. Set `enabled=false` outside debugging windows on shared or production engines. Disabling releases paused messages. Re-enable and redeploy the target channels before the next debugging session.
+Enabling the debugger adds observation hooks across the engine, even without an armed session. Idle observation reuses scope observers and avoids repeated source-registry locking, but observation and active debugging still add processing cost. User and channel restrictions control access; they do not remove hooks from other channels. Choose **Disable debugger** when observation is no longer needed. Disabling releases paused messages. Re-enable and redeploy the target channels before the next debugging session.
 
-An explicitly saved `enabled=true` setting remains enabled after an upgrade. Reload Web Administrator after upgrading so commands use the current retry protocol.
+Explicitly saved `enabled=true` and `enabled=false` settings remain in effect after an upgrade. Reload Web Administrator after upgrading so commands use the current retry protocol.
 
 ## Choose a target execution
 
@@ -77,7 +80,9 @@ To inspect a channel's **Deploy** script:
 
 After the channel finishes deploying, the session ends. Choose **Clear session** before arming for the next execution you want to follow.
 
-For global scripts, select **Global scripts** in **Channel** and select **Include lifecycle and scripts without a message**. Arm a session for the global execution you want to inspect.
+Global preprocessor and postprocessor scripts run in the processing channel's context. Select that channel to debug those executions, and leave script/source filters broad enough to include them.
+
+For global deploy and undeploy scripts, select **Global scripts** in **Channel** and select **Include lifecycle and scripts without a message**. This special target follows executions without a single channel context; it does not select every channel. Global deploy/undeploy scripts run around deployment operations, which can involve multiple channels.
 
 Keep the Debugger tab open and use a separate administration tab for engine actions. Global-script sessions follow the global target independently of individual channel sessions.
 

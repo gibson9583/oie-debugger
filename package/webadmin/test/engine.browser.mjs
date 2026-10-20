@@ -17,6 +17,10 @@ const clean = (value) =>
   );
 const save = async (name, data) =>
   writeFile(c.attempt + "/" + name, JSON.stringify(data, null, 2) + "\n");
+const headerScreenshot = async (name) => {
+  await page.locator(".dbg-body").evaluate(el => { el.scrollTop = 0; });
+  await page.screenshot({ path: output + "/" + name, animations: "disabled" });
+};
 try {
   const context = await browser.newContext({
     ignoreHTTPSErrors: true,
@@ -92,6 +96,25 @@ try {
   await page
     .getByRole("heading", { name: "JavaScript Debugger", exact: true })
     .waitFor();
+  await page.getByRole("button", { name: "Disable debugger", exact: true }).click();
+  await page.getByRole("button", { name: "Enable debugger", exact: true }).waitFor();
+  await page.getByText("Debugging disabled", { exact: true }).waitFor();
+  await headerScreenshot("debugger-disabled-desktop.png");
+  await page.getByTitle("Hide navigation", { exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await headerScreenshot("debugger-disabled-mobile.png");
+  await page.getByRole("button", { name: "Enable debugger", exact: true }).click();
+  await page.getByRole("button", { name: "Disable debugger", exact: true }).waitFor();
+  await page.getByText("Debugging enabled", { exact: true }).waitFor();
+  await headerScreenshot("debugger-enabled-mobile.png");
+  await page.setViewportSize({ width: 1600, height: 1100 });
+  await headerScreenshot("debugger-enabled-desktop.png");
+  const redeploy = await context.request.post(
+    c.baseUrl + "/api/channels/" + c.channelId + "/_deploy?returnErrors=true",
+    { headers: { "X-Requested-With": "OpenIntegrationEngine" } },
+  );
+  assert(redeploy.ok(), await redeploy.text());
+  checks.push("Engine-wide UI disable/enable uses the real REST endpoint; target channel redeployed after enabling");
   await page.locator(".dbg-target select").first().selectOption(c.channelId);
   await page.getByLabel("Connector ID (optional)", { exact: true }).fill("0");
   await page
@@ -278,6 +301,31 @@ try {
   assert.equal(messageIds.length, 1, JSON.stringify(messageIds));
   assert.deepEqual(errors, []);
   const editedMessageIds = [...messageIds];
+  // Disabling must release a real paused execution, not just clear the UI.
+  await page.getByRole("button", { name: "Arm debugger", exact: true }).click();
+  await page.locator(".dbg-status").filter({ hasText: "armed" }).waitFor();
+  await page.locator(".dbg-send textarea").fill(message);
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await page.locator(".dbg-status").filter({ hasText: "paused" }).waitFor();
+  await page.getByRole("button", { name: "Disable debugger", exact: true }).click();
+  await page.getByRole("button", { name: "Enable debugger", exact: true }).waitFor();
+  for (let i = 0; i < 100 && messageIds.length < 2; i++) await page.waitForTimeout(100);
+  assert.equal(messageIds.length, 2, "Disabling releases the paused message HTTP request");
+  const disabled = await context.request.get(c.baseUrl + "/api/extensions/debugger/capabilities", {
+    headers: { "X-Requested-With": "OpenIntegrationEngine", "Accept": "application/json" },
+  });
+  assert.equal(disabled.status(), 200, await disabled.text());
+  const disabledStatus = await disabled.json();
+  assert.equal(disabledStatus.activeSessions, 0);
+  assert.equal(disabledStatus.configuredEnabled, false);
+  checks.push("Disable through the UI closes the armed session and releases its paused message to completion");
+  await page.getByRole("button", { name: "Enable debugger", exact: true }).click();
+  await page.getByRole("button", { name: "Disable debugger", exact: true }).waitFor();
+  const redeployed = await context.request.post(
+    c.baseUrl + "/api/channels/" + c.channelId + "/_deploy?returnErrors=true",
+    { headers: { "X-Requested-With": "OpenIntegrationEngine" } },
+  );
+  assert(redeployed.ok(), await redeployed.text());
   await page.getByRole("button", { name: "Arm debugger", exact: true }).click();
   await page.locator(".dbg-status").filter({ hasText: "armed" }).waitFor();
   await page.locator(".dbg-send textarea").fill(message);
@@ -299,6 +347,10 @@ try {
     channelId: c.channelId,
     errors,
     screenshots: [
+      "debugger-disabled-desktop.png",
+      "debugger-disabled-mobile.png",
+      "debugger-enabled-desktop.png",
+      "debugger-enabled-mobile.png",
       "debugger-session.png",
       "debugger-paused.png",
       "debugger-inspect.png",
