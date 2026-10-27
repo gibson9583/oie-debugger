@@ -37,7 +37,7 @@ Review changes against the whole runtime flow: attachment and source discovery, 
 | Disable while paused | Persist false, close every owner's session, release message execution | Settings JVM and installed-engine UI scenario |
 | Enable after disabling | Persist true; redeploy channels, then Arm successfully | Installed-engine UI scenario |
 | No Manage JavaScript Debugger permission / revoked after render | Hide control; direct and engine-properties writes denied before saving | RBAC-keyed operation mapping, settings JVM and browser tests |
-| Unknown extension identity / trailing-space alias | GET, HEAD and merge/replacement PUT return 404 before authorization or SQL; no durable or runtime mutation after restart | Request-filter JVM tests and both released OIE/RBAC stacks |
+| Name does not exactly match an installed extension | GET, HEAD and merge/replacement PUT return 404; no durable or runtime mutation after restart | Request-filter JVM tests and both released OIE/RBAC stacks |
 | Alternate encoding of the exact installed name / matrix parameter | Normal View/Manage authorization still applies | Installed-engine settings harness |
 | Registry unavailable | Fail closed before any property read/write | Request-filter JVM test |
 | Debugging disabled in settings | Identity guard still protects generic properties, including after restart | Installed-engine settings harness |
@@ -52,10 +52,9 @@ Review changes against the whole runtime flow: attachment and source discovery, 
 The setting endpoint accepts exactly one JSON boolean and requires View and Manage
 JavaScript Debugger. Manage also covers the engine's `setPluginProperties` operation
 for this extension, and View covers `getPluginProperties`. The engine authorizes
-extension operations as `<extension>#<operation>`, and RBAC allows operations without
-a mapping. The settings tests use that lookup with the plugin's registered permissions,
-so an unmapped check fails the test. The endpoint writes only the `enabled` database
-property and reads it back before applying runtime settings. ConfigurationController's engine crypto and configuration types are
+extension operations using the owning extension and operation name. The settings
+tests verify the plugin's registered permission mappings for both property operations.
+The endpoint writes only the `enabled` database property and reads it back before applying runtime settings. ConfigurationController's engine crypto and configuration types are
 present only on the JVM test classpath; they are not bundled in the plugin ZIP.
 
 ## Released-engine settings authorization
@@ -64,10 +63,13 @@ The request filter is registered as a server API provider through the engine's
 supported extension metadata. It binds only to the core extension-property GET/PUT
 handlers, using their actual resource class and method, rather than matching a URL
 string. It checks Jersey's decoded `extensionName` against the exact installed plugin
-and connector metadata keys. Unknown names are rejected instead of trying to emulate
-a database's string comparison. Canonical requests retain the engine's authentication,
+and connector metadata keys. Unknown names return 404. Canonical requests retain
+the engine's authentication,
 RBAC permission checks, auditing and property application. This guard is supplied by
 the loaded debugger extension; disabling debugger observation does not unload it.
+Disabling the extension in Extensions and restarting unloads its permissions and
+request filter. The installed-engine harness covers disabled observation, not an
+unloaded extension.
 
 CI runs `scripts/test-settings-rbac.py` against the released OIE 4.6.0/RBAC 1.1.4
 and OIE 4.7.0/RBAC 1.2.0 distributions. It verifies input hashes, installs through

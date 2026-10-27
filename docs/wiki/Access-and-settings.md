@@ -2,7 +2,7 @@
 
 Engine permissions determine which debugger tools a user can open and use. Extension properties provide an additional way to select the users and channels that participate in debugging.
 
-These settings describe version 1.0.4. When upgrading from 1.0.0, reload Web Administrator to use the current command-retry protocol. Explicitly saved enabled or disabled settings remain in effect.
+Reload Web Administrator after upgrading. Explicitly saved enabled or disabled settings remain in effect.
 
 ## Grant the required permissions
 
@@ -28,7 +28,7 @@ Debugging is enabled by default on a new installation. Use **Enable debugger / D
 
 The endpoint changes only `enabled`; existing user/channel restrictions and other extension properties remain intact. The extension properties remain available through the engine's extension settings/API. Reading them requires **View JavaScript Debugger**. Changing them requires **Manage JavaScript Debugger**.
 
-The generic properties API requires the exact installed extension name, for example `/api/extensions/JavaScript%20Debugger/properties`. While the debugger extension is loaded, it rejects unknown names and spelling variants with 404 for all extensions. This closes an OIE 4.6.0/4.7.0 authorization bypass where a trailing-space name missed RBAC's permission mapping but matched the saved settings in Derby. The guard stays active when debugging is disabled using the debugger control. It is provided by the debugger extension and requires the extension to remain loaded.
+While the debugger extension is loaded, the generic properties API requires the exact installed extension name, for example `/api/extensions/JavaScript%20Debugger/properties`. Unknown names return 404. The request filter applies to all extensions' generic properties. Use the debugger screen's **Disable debugger** control to stop observation while keeping settings protection active. Disabling the extension in **Extensions** and restarting unloads its permissions and request filter. This protection depends on the debugger extension being loaded; it does not replace authorization in the engine and RBAC.
 
 | Property | How to use it |
 | --- | --- |

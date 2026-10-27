@@ -4,7 +4,7 @@ Version **1.0.4** supports OIE **4.6.0 and 4.7.0**. See [GitHub Releases](https:
 
 Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
-Version 1.0.4 enables debugging by default. The debugger screen has an engine-wide **Enable debugger / Disable debugger** control for users with the **Manage JavaScript Debugger** permission. Arming still selects the executions that may pause. Explicit saved settings remain in effect on upgrade.
+Debugging is enabled by default. The debugger screen has an engine-wide **Enable debugger / Disable debugger** control for users with the **Manage JavaScript Debugger** permission. Arming still selects the executions that may pause. Explicit saved settings remain in effect on upgrade.
 
 ![A sample order paused in the debugger, with its deployed script, variables, and call stack visible](docs/images/debugger-paused.png)
 
@@ -34,7 +34,7 @@ The debugger is enabled by default. Enabling it adds JavaScript observation acro
 
 After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` and `enabled=false` settings remain in effect on upgrade. Existing roles do not include **Manage JavaScript Debugger**. Grant it to the users who enable or disable debugging.
 
-Version 1.0.4 also guards the engine's generic extension-properties API on OIE 4.6.0 and 4.7.0. While the debugger extension is loaded, those GET/PUT routes require an exact installed extension name; unknown names and trailing-space aliases return 404 before authorization or persistence. Canonical debugger properties require View to read and Manage to change. The guard remains active when debugging is disabled with the debugger control.
+While the debugger extension is loaded, the engine's generic extension-properties API requires the exact installed extension name. Debugger properties require **View JavaScript Debugger** to read and **Manage JavaScript Debugger** to change. Use the debugger screen's **Disable debugger** control to stop observation while keeping settings protection active. Disabling the extension in **Extensions** and restarting unloads its permissions and request filter.
 
 The engine's JavaScript setting is `rhino.optimizationlevel=-1`. This is the default when the property is absent from `conf/mirth.properties`. If the property is already present, set its value to `-1` before restarting.
 
