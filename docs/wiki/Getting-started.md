@@ -21,7 +21,7 @@ The debugger uses Rhino's interpreted mode. OIE uses the required setting by def
 rhino.optimizationlevel=-1
 ```
 
-Restart the engine after changing that property. The debugger defaults to enabled. If a previous installation saved it as disabled, use **Enable debugger** at the left of the execution buttons in **Monitor → Debugger** with **Manage Extensions** permission. Deploy your test channel so its JavaScript is ready to inspect. For an existing channel that was compiled while the debugger was disabled, redeploy it before starting the walkthrough. Use **Disable debugger** to stop observation and release paused executions across the engine.
+Restart the engine after changing that property. The debugger defaults to enabled. If a previous installation saved it as disabled, use **Enable debugger** at the left of the execution buttons in **Monitor → Debugger** with **Manage JavaScript Debugger** permission. Deploy your test channel so its JavaScript is ready to inspect. For an existing channel that was compiled while the debugger was disabled, redeploy it before starting the walkthrough. Use **Disable debugger** to stop observation and release paused executions across the engine.
 
 ## Check your permissions
 

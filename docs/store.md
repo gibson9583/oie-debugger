@@ -1,6 +1,6 @@
 # JavaScript Debugger
 
-Version **1.0.3** supports **OIE 4.6.0 and 4.7.0**. Debugging is enabled by default, with an engine-wide enable/disable control in Web Administrator.
+Version **1.0.4** supports **OIE 4.6.0 and 4.7.0**. Debugging is enabled by default, with an engine-wide enable/disable control in Web Administrator.
 
 Pause channel JavaScript at breakpoints, step through execution, and inspect variables, maps, and expressions in OIE Web Administrator.
 
@@ -12,7 +12,9 @@ Pause channel JavaScript at breakpoints, step through execution, and inspect var
 
 ## Install or upgrade
 
-Install the debugger ZIP, restart the engine, and reload Web Administrator. Debugging is enabled by default; explicit saved settings remain in effect on upgrade. Use **Enable debugger / Disable debugger** in **Monitor → Debugger** with **Manage Extensions** permission. After enabling, redeploy the channels you want to debug.
+Install the debugger ZIP, restart the engine, and reload Web Administrator. Debugging is enabled by default; explicit saved settings remain in effect on upgrade. Use **Enable debugger / Disable debugger** in **Monitor → Debugger** with **Manage JavaScript Debugger** permission. After enabling, redeploy the channels you want to debug.
+
+While the debugger extension is loaded, the engine's generic extension-properties API requires the exact installed extension name. Debugger properties require **View JavaScript Debugger** to read and **Manage JavaScript Debugger** to change. The debugger screen's **Disable debugger** control keeps settings protection active. Disabling the extension in **Extensions** and restarting unloads its permissions and request filter.
 
 Open **Monitor → Debugger**, choose a permitted channel, select **Break on entry**, and arm the debugger. Send a test message to pause and inspect its execution. Choose **End session** to release the execution.
 

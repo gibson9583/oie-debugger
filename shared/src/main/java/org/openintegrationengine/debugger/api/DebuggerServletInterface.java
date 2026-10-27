@@ -18,12 +18,13 @@ public interface DebuggerServletInterface extends BaseServletInterface {
     String VIEW = "View JavaScript Debugger";
     String CONTROL = "Control JavaScript Debugger";
     String EVALUATE = "Evaluate JavaScript Debugger";
+    String MANAGE = "Manage JavaScript Debugger";
 
     @GET @Path("/capabilities")
     @MirthOperation(name="debuggerCapabilities", display="Debugger capabilities", permission=VIEW, type=ExecuteType.ASYNC, auditable=false)
     Response capabilities();
     @PUT @Path("/enabled")
-    @MirthOperation(name="debuggerSetEnabled", display="Enable or disable debugger", permission=VIEW, type=ExecuteType.ASYNC)
+    @MirthOperation(name="debuggerSetEnabled", display="Enable or disable debugger", permission=MANAGE, type=ExecuteType.ASYNC)
     Response setEnabled(@Param(value="body", excludeFromAudit=true) String body);
     @GET @Path("/sources")
     @MirthOperation(name="debuggerSources", display="Debugger sources", permission=VIEW, type=ExecuteType.ASYNC, auditable=false)

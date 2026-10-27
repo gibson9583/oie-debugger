@@ -84,7 +84,9 @@ class EngineRun:
 
     def prepare(self):
         assert sha(self.args.engine) == ENGINE_SHA, "OIE archive checksum mismatch"
-        assert sha(self.args.web_support) == WEB_SUPPORT_SHA, "Web Support checksum mismatch"
+        web_support = getattr(self.args, "web_support", None)
+        if web_support is not None:
+            assert sha(web_support) == WEB_SUPPORT_SHA, "Web Support checksum mismatch"
         self.root = Path(tempfile.mkdtemp(prefix="oie-debugger-integration-"))
         (self.root / ".owner").write_text(self.owner)
         with tarfile.open(self.args.engine) as archive:
@@ -104,8 +106,11 @@ class EngineRun:
             properties += f"\n{key} = {value}"
         path.write_text(properties + "\n")
         shutil.copy2(path, self.output / "isolated-mirth.properties")
-        self.save("inputs.json", {"engineSha256": ENGINE_SHA, "webSupportSha256": WEB_SUPPORT_SHA,
-                "packageSha256": sha(self.args.package), "javaHome": os.environ["JAVA_HOME"]})
+        inputs = {"engineSha256": ENGINE_SHA, "packageSha256": sha(self.args.package),
+                "javaHome": os.environ["JAVA_HOME"]}
+        if web_support is not None:
+            inputs["webSupportSha256"] = WEB_SUPPORT_SHA
+        self.save("inputs.json", inputs)
 
     def start(self):
         self.starts += 1

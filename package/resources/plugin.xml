@@ -14,6 +14,7 @@
     </pluginClass></controllerClasses>
     <apiProvider type="SERVLET_INTERFACE" name="org.openintegrationengine.debugger.api.DebuggerServletInterface" />
     <apiProvider type="SERVER_CLASS" name="org.openintegrationengine.debugger.api.DebuggerServlet" />
+    <apiProvider type="SERVER_CLASS" name="org.openintegrationengine.debugger.api.ExtensionPropertiesGuard" />
     <library type="SHARED" path="libs/oie-debugger-shared-${project.version}.jar" />
     <library type="SERVER" path="libs/oie-debugger-server-${project.version}.jar" />
 </pluginMetaData>

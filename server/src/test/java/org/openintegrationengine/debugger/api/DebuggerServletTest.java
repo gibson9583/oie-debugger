@@ -546,13 +546,14 @@ class DebuggerServletTest {
     }
 
     @Test void allRestOperationsHaveAnExplicitRegisteredPermission() {
-        Set<String> mapped = new java.util.HashSet<>();
-        for (var permission : new DebuggerPlugin().getExtensionPermissions()) mapped.addAll(java.util.Arrays.asList(permission.getOperationNames()));
+        var mapped = new java.util.HashMap<String, String>();
+        for (var permission : new DebuggerPlugin().getExtensionPermissions())
+            for (String name : permission.getOperationNames()) assertNull(mapped.put(name, permission.getDisplayName()), name);
         for (var method : DebuggerServletInterface.class.getDeclaredMethods()) {
             var operation = method.getAnnotation(com.mirth.connect.client.core.api.MirthOperation.class);
-            assertNotNull(operation); assertTrue(mapped.contains(operation.name()), operation.name());
+            assertNotNull(operation); assertEquals(operation.permission(), mapped.get(operation.name()), operation.name());
         }
-        assertTrue(mapped.contains("debuggerEvaluate"));
+        assertTrue(mapped.containsKey("debuggerEvaluate"));
     }
 
     @Test void commandAndSourceBodiesNeverUseEngineXstreamWrapping() {

@@ -1,12 +1,12 @@
-# Debugger 1.0.3
+# Debugger 1.0.4
 
-- Patch update from 1.0.2, supporting OIE 4.6.0 and 4.7.0.
-- Restore the enabled default for fresh installations. Explicit saved settings remain in effect on upgrade.
-- Add Enable debugger / Disable debugger at the left of the execution buttons, using `PUT /api/extensions/debugger/enabled` with one explicit JSON boolean.
-- Require View JavaScript Debugger and the engine's native Manage Extensions permission. Preserve independent user/channel access restrictions and other extension properties.
-- Confirm persistence before updating runtime settings. Disabling releases paused executions across all owners; repeating the current setting preserves sessions.
-- Keep compile baseline 4.6.0 and unchanged Web Administrator API requirements. Maven, engine descriptor, catalog and Web Administrator package versions are synchronized.
+- Supports OIE 4.6.0 and 4.7.0, with Java 17 or newer and Web Administrator plugin API 4.7 or newer.
+- **Enable debugger / Disable debugger** requires both **View JavaScript Debugger** and **Manage JavaScript Debugger**.
+- Reading debugger extension properties requires View; changing them requires Manage.
+- While the debugger extension is loaded, the engine's generic extension-properties API requires the exact installed extension name. The request filter covers all extensions' generic properties and remains active when observation is disabled through the debugger screen.
+- Disabling the extension in **Extensions** and restarting unloads its permissions and request filter. The filter depends on the debugger being loaded and does not replace authorization in the engine and RBAC.
+- Grant Manage to users who manage debugger settings. Existing roles do not gain it automatically on upgrade; RBAC administrator roles retain full access. Explicit saved settings remain in effect. Reload Web Administrator after upgrading.
 
-Validation includes 263 JVM tests, 72 JavaScript tests, 10 browser regression suites and 12 Python package tests. The exact unsigned candidate was installed and exercised on an isolated stock OIE 4.6.0 engine: enabled default, saved-disabled restart, UI/REST toggling, malformed requests, idempotence, paused-message release, re-enabling/redeploying, value edits, lease expiry, message completion and persisted audit events. Owned installations and databases were removed after process exit and evidence capture. The maintainer also verified the candidate on their OIE 4.7.0 installation.
+Validation includes JVM and JavaScript tests, browser regressions, package checks, and installed-engine settings regressions against OIE 4.6.0/RBAC 1.1.4 and OIE 4.7.0/RBAC 1.2.0. The settings harness covers upgrade, read/write authorization, permission changes, concurrency and restart persistence. CI runs both released stacks with pinned input hashes and preserves evidence after removing owned engines and databases.
 
-See [Debugger validation](Testing.md) for the behavior matrix and checks. Signed release assets and release notes are published through [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.3).
+See [Debugger validation](Testing.md) for the behavior matrix and checks. Signed release assets and release notes are published through [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.4).

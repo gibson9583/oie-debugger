@@ -17,6 +17,7 @@ class ObserveDatabase {
             }
             Collections.sort(tables);
             tables.add(0, "D_CHANNELS");
+            tables.add("CONFIGURATION");
             tables.add("EVENT");
             for (String table : tables) {
                 System.out.println("TABLE " + table);
