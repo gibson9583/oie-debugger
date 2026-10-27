@@ -34,6 +34,8 @@ The debugger is enabled by default. Enabling it adds JavaScript observation acro
 
 After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` and `enabled=false` settings remain in effect on upgrade. Existing roles do not include **Manage JavaScript Debugger**. Grant it to the users who enable or disable debugging.
 
+Version 1.0.4 also guards the engine's generic extension-properties API on OIE 4.6.0 and 4.7.0. While the debugger extension is loaded, those GET/PUT routes require an exact installed extension name; unknown names and trailing-space aliases return 404 before authorization or persistence. Canonical debugger properties require View to read and Manage to change. The guard remains active when debugging is disabled with the debugger control.
+
 The engine's JavaScript setting is `rhino.optimizationlevel=-1`. This is the default when the property is absent from `conf/mirth.properties`. If the property is already present, set its value to `-1` before restarting.
 
 Deploy your test channel with the debugger enabled so its scripts are available. After enabling the debugger for an already running engine, redeploy the channels you want to inspect.

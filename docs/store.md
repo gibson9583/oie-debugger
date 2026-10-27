@@ -14,6 +14,8 @@ Pause channel JavaScript at breakpoints, step through execution, and inspect var
 
 Install the debugger ZIP, restart the engine, and reload Web Administrator. Debugging is enabled by default; explicit saved settings remain in effect on upgrade. Use **Enable debugger / Disable debugger** in **Monitor → Debugger** with **Manage JavaScript Debugger** permission. After enabling, redeploy the channels you want to debug.
 
+Version 1.0.4 closes the RBAC settings bypass, including trailing-space extension names. While this extension is loaded, the engine's generic extension-properties API accepts exact installed extension names only. Debugger properties require View to read and Manage to change; disabling debugger observation leaves this protection active.
+
 Open **Monitor → Debugger**, choose a permitted channel, select **Break on entry**, and arm the debugger. Send a test message to pause and inspect its execution. Choose **End session** to release the execution.
 
 Enabling debugging adds JavaScript observation across the engine, even without an armed session. Choose **Disable debugger** to stop observation and release paused executions engine-wide. Expression evaluation runs with the engine's permissions.

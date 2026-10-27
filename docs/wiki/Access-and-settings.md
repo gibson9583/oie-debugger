@@ -28,6 +28,8 @@ Debugging is enabled by default on a new installation. Use **Enable debugger / D
 
 The endpoint changes only `enabled`; existing user/channel restrictions and other extension properties remain intact. The extension properties remain available through the engine's extension settings/API. Reading them requires **View JavaScript Debugger**. Changing them requires **Manage JavaScript Debugger**.
 
+The generic properties API requires the exact installed extension name, for example `/api/extensions/JavaScript%20Debugger/properties`. While the debugger extension is loaded, it rejects unknown names and spelling variants with 404 for all extensions. This closes an OIE 4.6.0/4.7.0 authorization bypass where a trailing-space name missed RBAC's permission mapping but matched the saved settings in Derby. The guard stays active when debugging is disabled using the debugger control. It is provided by the debugger extension and requires the extension to remain loaded.
+
 | Property | How to use it |
 | --- | --- |
 | `enabled` | Set to `true` to enable JavaScript observation and debugging. Default: `true`. Redeploy target channels after enabling. |
