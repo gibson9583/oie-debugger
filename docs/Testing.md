@@ -14,7 +14,7 @@ With Java 17, Python 3.12+, Node and Playwright Chromium installed:
 python3 scripts/test-engine.py \
   --engine /path/to/oie_unix_4_6_0.tar.gz \
   --web-support /path/to/websupport-1.0.5.zip \
-  --package package/target/oie-debugger-1.0.3.zip \
+  --package package/target/oie-debugger-1.0.4.zip \
   --output test-results/engine-run \
   --artifacts /path/to/shared-runtime-inputs/sha256 \
   --benchmark
@@ -36,7 +36,7 @@ Review changes against the whole runtime flow: attachment and source discovery, 
 | Saved `enabled=false` on upgrade | Stay disabled; status and Enable control remain readable | Settings JVM and browser tests; restart persistence |
 | Disable while paused | Persist false, close every owner's session, release message execution | Settings JVM and installed-engine UI scenario |
 | Enable after disabling | Persist true; redeploy channels, then Arm successfully | Installed-engine UI scenario |
-| No Manage Extensions permission / revoked after render | Hide control; direct mutation denied before saving | Native operation mapping, settings JVM and browser tests |
+| No Manage JavaScript Debugger permission / revoked after render | Hide control; direct and engine-properties writes denied before saving | RBAC-keyed operation mapping, settings JVM and browser tests |
 | Explicit installation restrictions | Preserve every unrelated property; exclude source/session access | Settings and servlet JVM tests |
 | Invalid or extra request fields | Reject with 400; no writes | Settings JVM tests |
 | Save fails or read-back cannot confirm | Return 500; keep prior runtime state | Settings JVM tests |
@@ -45,9 +45,11 @@ Review changes against the whole runtime flow: attachment and source discovery, 
 | Overlapping refresh / disable during Arm | Ignore old capabilities and old Arm/source/session responses | Client and browser tests |
 | Login/engine changes during write | Ignore reply and invalidate the old UI | Browser test |
 
-The setting endpoint accepts exactly one JSON boolean and uses the engine's native
-`setPluginProperties` permission. Its permission check uses an unwrapped native
-operation, rather than a debugger extension operation with the same name. It writes
-only the `enabled` database property and reads it back before applying runtime
-settings. ConfigurationController's engine crypto and configuration types are
+The setting endpoint accepts exactly one JSON boolean and requires View and Manage
+JavaScript Debugger. Manage also covers the engine's `setPluginProperties` operation
+for this extension, and View covers `getPluginProperties`. The engine authorizes
+extension operations as `<extension>#<operation>`, and RBAC allows operations without
+a mapping. The settings tests use that lookup with the plugin's registered permissions,
+so an unmapped check fails the test. The endpoint writes only the `enabled` database
+property and reads it back before applying runtime settings. ConfigurationController's engine crypto and configuration types are
 present only on the JVM test classpath; they are not bundled in the plugin ZIP.

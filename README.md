@@ -1,10 +1,10 @@
 # OIE JavaScript Debugger
 
-Version **1.0.3** supports OIE **4.6.0 and 4.7.0**. See [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.3) for the signed ZIP and release notes.
+Version **1.0.4** supports OIE **4.6.0 and 4.7.0**. See [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases/tag/v1.0.4) for the signed ZIP and release notes.
 
 Debug JavaScript running in Open Integration Engine from Web Administrator. Pause a message, follow the code one line at a time, and inspect its values as it moves through a channel.
 
-Version 1.0.3 enables debugging by default and adds an engine-wide **Enable debugger / Disable debugger** control to the debugger screen. Arming still selects the executions that may pause. Explicit saved settings remain in effect on upgrade.
+Version 1.0.4 enables debugging by default. The debugger screen has an engine-wide **Enable debugger / Disable debugger** control for users with the **Manage JavaScript Debugger** permission. Arming still selects the executions that may pause. Explicit saved settings remain in effect on upgrade.
 
 ![A sample order paused in the debugger, with its deployed script, variables, and call stack visible](docs/images/debugger-paused.png)
 
@@ -27,12 +27,12 @@ Use Java 17 or newer, **OIE 4.6.0 or 4.7.0**, and **Web Administrator with plugi
 1. Download the debugger ZIP from [GitHub Releases](https://github.com/gibson9583/oie-debugger/releases).
 2. Install the ZIP through the engine's extension installer.
 3. Restart the engine, then reload Web Administrator.
-4. Open **Monitor → Debugger**. If an earlier installation saved debugging as disabled, choose **Enable debugger**. The control is at the left of the execution buttons and requires **Manage Extensions** permission.
+4. Open **Monitor → Debugger**. If an earlier installation saved debugging as disabled, choose **Enable debugger**. The control is at the left of the execution buttons and requires **Manage JavaScript Debugger** permission.
 5. Deploy or redeploy the channels you want to debug.
 
 The debugger is enabled by default. Enabling it adds JavaScript observation across the engine, including channels without an armed session. Idle observation reuses scope observers and avoids repeated source-registry locking, but still has a cost. Choose **Disable debugger** to stop observation and release paused executions across the engine. User and channel access restrictions do not limit where observation hooks run.
 
-After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` and `enabled=false` settings remain in effect on upgrade.
+After upgrading, reload Web Administrator before arming a session so the browser and server use the same command-retry protocol. Explicit saved `enabled=true` and `enabled=false` settings remain in effect on upgrade. Existing roles do not include **Manage JavaScript Debugger**. Grant it to the users who enable or disable debugging.
 
 The engine's JavaScript setting is `rhino.optimizationlevel=-1`. This is the default when the property is absent from `conf/mirth.properties`. If the property is already present, set its value to `-1` before restarting.
 
@@ -57,6 +57,6 @@ Set **Maximum pause (seconds)** to choose a pause duration from 1 to 120 seconds
 
 The [usage wiki](https://github.com/gibson9583/oie-debugger/wiki) includes installation, a sample channel, sending messages, breakpoints, stepping, inspecting values, permissions, and session recovery. You can also read the [guide in this repository](docs/wiki/Home.md).
 
-Users need **Manage Extensions** to enable or disable debugging engine-wide, **View JavaScript Debugger** to read sources, **Control JavaScript Debugger** to run a session, **Evaluate JavaScript Debugger** to use expression features, and **Send Message** to send a sample. Channel permissions and the debugger's extension properties let administrators choose who can debug each channel. See [Access and settings](https://github.com/gibson9583/oie-debugger/wiki/Access-and-settings) for setup steps.
+Users need **Manage JavaScript Debugger** to enable or disable debugging engine-wide, **View JavaScript Debugger** to read sources, **Control JavaScript Debugger** to run a session, **Evaluate JavaScript Debugger** to use expression features, and **Send Message** to send a sample. Channel permissions and the debugger's extension properties let administrators choose who can debug each channel. See [Access and settings](https://github.com/gibson9583/oie-debugger/wiki/Access-and-settings) for setup steps.
 
 Licensed under the [Mozilla Public License 2.0](LICENSE).

@@ -2,7 +2,7 @@
 
 Engine permissions determine which debugger tools a user can open and use. Extension properties provide an additional way to select the users and channels that participate in debugging.
 
-These settings describe version 1.0.3. When upgrading from 1.0.0, reload Web Administrator to use the current command-retry protocol. Explicitly saved enabled or disabled settings remain in effect.
+These settings describe version 1.0.4. When upgrading from 1.0.0, reload Web Administrator to use the current command-retry protocol. Explicitly saved enabled or disabled settings remain in effect.
 
 ## Grant the required permissions
 
@@ -10,21 +10,23 @@ Use the engine's permission management to assign:
 
 | Permission | Enables |
 | --- | --- |
-| **View JavaScript Debugger** | Opening the debugger and reading deployed sources for permitted channels. |
+| **View JavaScript Debugger** | Opening the debugger, reading deployed sources for permitted channels, and reading the extension properties. |
 | **Control JavaScript Debugger** | Arming and managing the user's own debug sessions, pausing, stepping, inspecting paused values, and setting breakpoints. |
 | **Evaluate JavaScript Debugger** | Expression evaluation, watches, conditional breakpoints, and local value editing. |
-| **Manage Extensions** | Enabling or disabling debugging across the engine from the debugger screen. |
+| **Manage JavaScript Debugger** | Enabling or disabling debugging across the engine, and changing the extension properties. |
 | **Send Message** | Submitting a message through **Send a message**. |
 
 Give a debugging user View and Control, plus access to the channels they will work on. Add Evaluate for expression tools, and Send Message for the built-in sender. Existing engine channel permissions continue to determine channel access.
+
+Give Manage only to users who turn debugging on or off for the whole engine. Existing roles do not include Manage after an upgrade. Grant it to those users.
 
 Expression tools also use the session's **Enable evaluation and value editing** checkbox. This lets the user choose those tools each time they arm a session.
 
 ## Configure the extension
 
-Debugging is enabled by default on a new installation. Use **Enable debugger / Disable debugger** at the left of the execution buttons at the top of **Monitor → Debugger**. This changes the persisted engine-wide setting through `PUT /api/extensions/debugger/enabled` with JSON `{"enabled":true}` or `{"enabled":false}`. It requires both **View JavaScript Debugger** and **Manage Extensions** permissions, which the server rechecks on every request. Disabling immediately closes all debug sessions and releases paused executions. Repeated requests for the current state preserve active sessions.
+Debugging is enabled by default on a new installation. Use **Enable debugger / Disable debugger** at the left of the execution buttons at the top of **Monitor → Debugger**. This changes the persisted engine-wide setting through `PUT /api/extensions/debugger/enabled` with JSON `{"enabled":true}` or `{"enabled":false}`. It requires both **View JavaScript Debugger** and **Manage JavaScript Debugger** permissions, which the server rechecks on every request. Disabling immediately closes all debug sessions and releases paused executions. Repeated requests for the current state preserve active sessions.
 
-The endpoint changes only `enabled`; existing user/channel restrictions and other extension properties remain intact. The extension properties remain available through the engine's extension settings/API.
+The endpoint changes only `enabled`; existing user/channel restrictions and other extension properties remain intact. The extension properties remain available through the engine's extension settings/API. Reading them requires **View JavaScript Debugger**. Changing them requires **Manage JavaScript Debugger**.
 
 | Property | How to use it |
 | --- | --- |
