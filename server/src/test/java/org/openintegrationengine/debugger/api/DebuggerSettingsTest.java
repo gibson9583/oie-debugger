@@ -1,12 +1,17 @@
 package org.openintegrationengine.debugger.api;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
 import javax.ws.rs.core.Response;
+import com.mirth.connect.client.core.ExtensionOperation;
 import com.mirth.connect.client.core.Operation;
+import com.mirth.connect.client.core.api.MirthApiException;
+import com.mirth.connect.client.core.api.servlets.ExtensionServletInterface;
+import com.mirth.connect.model.ExtensionPermission;
 import com.mirth.connect.server.controllers.*;
 import org.junit.jupiter.api.*;
 import org.openintegrationengine.debugger.DebuggerPlugin;
@@ -64,6 +69,22 @@ class DebuggerSettingsTest {
     private String arm(String owner) {
         return runtime.create(owner, "channel-a", Map.of("tabId", "tab-a")).get("id").toString();
     }
+    private void rbac(String... granted) throws Exception {
+        Map<String, String> required = new HashMap<>();
+        for (ExtensionPermission permission : plugin.getExtensionPermissions())
+            for (String name : permission.getOperationNames())
+                required.put(permission.getExtensionName() + "#" + name, permission.getDisplayName());
+        Set<String> grants = Set.of(granted);
+        doAnswer(call -> {
+            String permission = required.get(((Operation) call.getArgument(1)).getName());
+            if (permission == null || grants.contains(permission)) return true;
+            throw new MirthApiException(Response.Status.FORBIDDEN);
+        }).when(authorization).isUserAuthorized(anyInt(), any(), anyMap(), any(), anyBoolean());
+    }
+    private boolean engineSettings(String name) throws Exception {
+        Operation operation = new ExtensionOperation(POINT, new Operation(name, name, Operation.ExecuteType.SYNC, true));
+        return authorization.isUserAuthorized(7, operation, Map.of(), "127.0.0.1", false);
+    }
 
     @Test void defaultIsEnabledAndExplicitSavedFalseIsRespected() {
         assertTrue(DebuggerPlugin.policy().enabled);
@@ -76,17 +97,39 @@ class DebuggerSettingsTest {
         assertEquals(true, body(change("{\"enabled\":true}")).get("configuredEnabled"));
     }
 
-    @Test void nativeManageExtensionsPermissionIsRequiredEvenWithDebuggerViewAndControl() {
-        denied = Set.of("setPluginProperties");
+    @Test void managePermissionIsRequiredEvenWithDebuggerViewAndControl() {
+        denied = Set.of(POINT + "#debuggerSetEnabled");
         assertEquals(false, body(servlet("debuggerCapabilities").capabilities()).get("managementAllowed"));
         assertEquals(403, change("{\"enabled\":false}").getStatus());
         verify(settings, never()).saveProperty(anyString(), anyString(), anyString());
         assertTrue(DebuggerPlugin.policy().enabled);
     }
 
+    @Test void rbacRejectsTheSettingWithoutManagePermission() throws Exception {
+        rbac(DebuggerServletInterface.VIEW, DebuggerServletInterface.CONTROL, DebuggerServletInterface.EVALUATE);
+        assertEquals(false, body(servlet("debuggerCapabilities").capabilities()).get("managementAllowed"));
+        assertEquals(403, change("{\"enabled\":false}").getStatus());
+        assertThrows(MirthApiException.class, () -> engineSettings(ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_SET));
+        assertTrue(engineSettings(ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_GET));
+        verify(settings, never()).saveProperty(anyString(), anyString(), anyString());
+        assertTrue(DebuggerPlugin.policy().enabled);
+    }
+
+    @Test void rbacRequiresViewAndManagePermissionsForTheSetting() throws Exception {
+        rbac(DebuggerServletInterface.MANAGE);
+        assertThrows(MirthApiException.class, () -> change("{\"enabled\":false}"));
+        assertThrows(MirthApiException.class, () -> engineSettings(ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_GET));
+        assertTrue(engineSettings(ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_SET));
+        verify(settings, never()).saveProperty(anyString(), anyString(), anyString());
+        rbac(DebuggerServletInterface.VIEW, DebuggerServletInterface.MANAGE);
+        assertEquals(true, body(servlet("debuggerCapabilities").capabilities()).get("managementAllowed"));
+        assertEquals(false, body(change("{\"enabled\":false}")).get("configuredEnabled"));
+        assertEquals("false", stored.getProperty("enabled"));
+    }
+
     @Test void permissionsAreRecheckedAfterRenderingTheControl() {
         assertEquals(true, body(servlet("debuggerCapabilities").capabilities()).get("managementAllowed"));
-        denied = Set.of("setPluginProperties");
+        denied = Set.of(POINT + "#debuggerSetEnabled");
         assertEquals(403, change("{\"enabled\":false}").getStatus());
         assertEquals("true", stored.getProperty("enabled"));
     }

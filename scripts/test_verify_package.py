@@ -1,11 +1,13 @@
 """Release gate regressions using the actual build output, without credentials."""
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 
 SPEC = importlib.util.spec_from_file_location("verify_package", Path(__file__).with_name("verify-package.py"))
@@ -81,6 +83,31 @@ class PackageTests(unittest.TestCase):
                                                   b"<pluginVersion>9.9.9</pluginVersion>")
         self.rewrite_zip(change)
         with self.assertRaisesRegex(ValueError, "descriptor version"):
+            verify.verify_bundle(self.bundle, self.root, {})
+
+    def test_missing_identity_guard_registration_rejected(self):
+        def change(entries):
+            name = "oie-debugger/plugin.xml"
+            descriptor = ET.fromstring(entries[name])
+            for node in descriptor.findall("apiProvider"):
+                if node.attrib.get("name", "").endswith(".ExtensionPropertiesGuard"):
+                    descriptor.remove(node)
+            entries[name] = ET.tostring(descriptor)
+        self.rewrite_zip(change)
+        with self.assertRaisesRegex(ValueError, "identity guard must be registered"):
+            verify.verify_bundle(self.bundle, self.root, {})
+
+    def test_missing_identity_guard_class_rejected(self):
+        def change(entries):
+            name = f"oie-debugger/libs/oie-debugger-server-{self.version}.jar"
+            rewritten = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(entries[name])) as original, zipfile.ZipFile(rewritten, "w") as jar:
+                for entry in original.infolist():
+                    if not entry.filename.endswith("/ExtensionPropertiesGuard$CanonicalNameFilter.class"):
+                        jar.writestr(entry, original.read(entry))
+            entries[name] = rewritten.getvalue()
+        self.rewrite_zip(change)
+        with self.assertRaisesRegex(ValueError, "identity guard must be packaged"):
             verify.verify_bundle(self.bundle, self.root, {})
 
     def test_duplicate_entry_rejected(self):

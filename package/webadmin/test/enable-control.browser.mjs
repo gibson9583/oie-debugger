@@ -21,7 +21,7 @@ const api={get:async(path)=>{calls.push(['GET',path]);if(path.endsWith('/capabil
  throw new Error('Unexpected GET '+path)},
  put:async(path,text)=>{const body=JSON.parse(text);calls.push(['PUT',path,body]);
  if(!path.endsWith('/enabled'))throw new Error('Unexpected PUT '+path);
- if(fail==='revoke'){manage=false;throw Object.assign(new Error('Manage Extensions permission required'),{status:403})}
+ if(fail==='revoke'){manage=false;throw Object.assign(new Error('Manage JavaScript Debugger permission required'),{status:403})}
  if(query.has('hold-write'))await new Promise(resolve=>writeHeld=resolve);
  const changed=enabled!==body.enabled;enabled=body.enabled;
  if(fail==='lost'){fail=null;throw new Error('Response lost')}
@@ -52,8 +52,8 @@ try{
  assert.deepEqual(await page.evaluate(()=>fixture.calls.filter(c=>c[0]==='PUT').map(c=>c.slice(1))),[
  ['/extensions/debugger/enabled',{enabled:false}],['/extensions/debugger/enabled',{enabled:true}]]);await page.close();
  page=await open('disabled');await expect(enable(page)).toBeEnabled();await enable(page).focus();await page.keyboard.press('Enter');await expect(disable(page)).toBeEnabled();await page.close();
- page=await open('disabled&read-only');await expect(panel(page).getByText(/Manage Extensions/)).toBeVisible();await expect(enable(page)).toHaveCount(0);await page.close();
- page=await open('fail=revoke');await disable(page).click();await expect(page.getByRole('alert')).toContainText('Manage Extensions');await expect(disable(page)).toHaveCount(0);await expect(panel(page)).toContainText('Debugging enabled');await page.close();
+ page=await open('disabled&read-only');await expect(panel(page).getByText(/Manage JavaScript Debugger/)).toBeVisible();await expect(enable(page)).toHaveCount(0);await page.close();
+ page=await open('fail=revoke');await disable(page).click();await expect(page.getByRole('alert')).toContainText('Manage JavaScript Debugger');await expect(disable(page)).toHaveCount(0);await expect(panel(page)).toContainText('Debugging enabled');await page.close();
  page=await open('fail=lost');await disable(page).click();await expect(page.getByRole('alert')).toContainText('Could not confirm');await expect(enable(page)).toBeEnabled();await expect(page.locator('.dbg-status')).toHaveText('Disabled');await page.close();
  page=await open();await expect(disable(page)).toBeEnabled();await page.evaluate(()=>{fixture.hold();window.dispatchEvent(new Event('focus'))});await disable(page).click();await expect(enable(page)).toBeEnabled();await page.evaluate(()=>fixture.release());await expect(page.locator('.dbg-status')).toHaveText('Disabled');await expect(disable(page)).toHaveCount(0);await page.close();
  page=await open('hold-write');await expect(disable(page)).toBeEnabled();await disable(page).click();await expect(page.getByRole('button',{name:'Saving…',exact:true})).toBeDisabled();await page.evaluate(()=>fixture.user());await page.evaluate(()=>fixture.finishWrite());await expect(page.getByRole('alert')).toContainText('login or engine changed');assert.equal(await page.evaluate(()=>fixture.calls.filter(c=>c[0]==='PUT').length),1);await page.close();

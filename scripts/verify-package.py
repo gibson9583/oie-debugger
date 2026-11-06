@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check source versions and the exact installable ZIP before publication."""
 
+import io
 import json
 import os
 from pathlib import Path
@@ -59,6 +60,15 @@ def verify_bundle(bundle, root=ROOT, environ=None):
         require(descriptor.findtext("pluginVersion") == version, "Packaged descriptor version mismatch")
         require({node.attrib["path"] for node in descriptor.findall("library")} == jars,
                 "Descriptor libraries do not match packaged JARs")
+        guard = "org.openintegrationengine.debugger.api.ExtensionPropertiesGuard"
+        require(any(node.attrib.get("type") == "SERVER_CLASS" and node.attrib.get("name") == guard
+                    for node in descriptor.findall("apiProvider")),
+                "Extension properties identity guard must be registered")
+        server_jar = archive.read(prefix + f"libs/oie-debugger-server-{version}.jar")
+        with zipfile.ZipFile(io.BytesIO(server_jar)) as server:
+            require(all(guard.replace(".", "/") + suffix in server.namelist()
+                        for suffix in (".class", "$CanonicalNameFilter.class")),
+                    "Extension properties identity guard must be packaged")
         for relative in ("LICENSE", "webadmin/plugin.json"):
             source = root / "package" / ("resources/LICENSE" if relative == "LICENSE" else relative)
             require(archive.read(prefix + relative) == source.read_bytes(), f"Packaged {relative} changed")

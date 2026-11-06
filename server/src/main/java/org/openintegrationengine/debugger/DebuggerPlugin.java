@@ -1,5 +1,6 @@
 package org.openintegrationengine.debugger;
 
+import com.mirth.connect.client.core.api.servlets.ExtensionServletInterface;
 import com.mirth.connect.model.Channel;
 import com.mirth.connect.model.ExtensionPermission;
 import com.mirth.connect.model.ServerEventContext;
@@ -155,13 +156,13 @@ public final class DebuggerPlugin implements ServicePlugin, ChannelPlugin {
             new ExtensionPermission(
                     getPluginPointName(),
                     DebuggerServletInterface.VIEW,
-                    "Read permitted debugger sources and owned sessions",
+                    "Read permitted debugger sources, owned sessions and debugger settings",
                     new String[] {
                         "debuggerCapabilities",
-                        "debuggerSetEnabled",
                         "debuggerSources",
                         "debuggerSource",
-                        "debuggerSession"
+                        "debuggerSession",
+                        ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_GET
                     },
                     new String[] {"doShowDebugger"}),
             new ExtensionPermission(
@@ -181,7 +182,16 @@ public final class DebuggerPlugin implements ServicePlugin, ChannelPlugin {
                     DebuggerServletInterface.EVALUATE,
                     "Execute expressions, conditional breakpoints, watches and value changes",
                     new String[] {"debuggerEvaluate"},
-                    new String[] {"doEvaluateDebugger"})
+                    new String[] {"doEvaluateDebugger"}),
+            new ExtensionPermission(
+                    getPluginPointName(),
+                    DebuggerServletInterface.MANAGE,
+                    "Enable or disable debugging and change debugger settings",
+                    new String[] {
+                        "debuggerSetEnabled",
+                        ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_SET
+                    },
+                    new String[] {"doManageDebugger"})
         };
     }
 

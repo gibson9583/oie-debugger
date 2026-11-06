@@ -14,7 +14,7 @@ With Java 17, Python 3.12+, Node and Playwright Chromium installed:
 python3 scripts/test-engine.py \
   --engine /path/to/oie_unix_4_6_0.tar.gz \
   --web-support /path/to/websupport-1.0.5.zip \
-  --package package/target/oie-debugger-1.0.3.zip \
+  --package package/target/oie-debugger-1.0.4.zip \
   --output test-results/engine-run \
   --artifacts /path/to/shared-runtime-inputs/sha256 \
   --benchmark
@@ -36,7 +36,11 @@ Review changes against the whole runtime flow: attachment and source discovery, 
 | Saved `enabled=false` on upgrade | Stay disabled; status and Enable control remain readable | Settings JVM and browser tests; restart persistence |
 | Disable while paused | Persist false, close every owner's session, release message execution | Settings JVM and installed-engine UI scenario |
 | Enable after disabling | Persist true; redeploy channels, then Arm successfully | Installed-engine UI scenario |
-| No Manage Extensions permission / revoked after render | Hide control; direct mutation denied before saving | Native operation mapping, settings JVM and browser tests |
+| No Manage JavaScript Debugger permission / revoked after render | Hide control; direct and engine-properties writes denied before saving | RBAC-keyed operation mapping, settings JVM and browser tests |
+| Name does not exactly match an installed extension | GET, HEAD and merge/replacement PUT return 404; no durable or runtime mutation after restart | Request-filter JVM tests and both released OIE/RBAC stacks |
+| Alternate encoding of the exact installed name / matrix parameter | Normal View/Manage authorization still applies | Installed-engine settings harness |
+| Registry unavailable | Fail closed before any property read/write | Request-filter JVM test |
+| Debugging disabled in settings | Identity guard still protects generic properties, including after restart | Installed-engine settings harness |
 | Explicit installation restrictions | Preserve every unrelated property; exclude source/session access | Settings and servlet JVM tests |
 | Invalid or extra request fields | Reject with 400; no writes | Settings JVM tests |
 | Save fails or read-back cannot confirm | Return 500; keep prior runtime state | Settings JVM tests |
@@ -45,9 +49,53 @@ Review changes against the whole runtime flow: attachment and source discovery, 
 | Overlapping refresh / disable during Arm | Ignore old capabilities and old Arm/source/session responses | Client and browser tests |
 | Login/engine changes during write | Ignore reply and invalidate the old UI | Browser test |
 
-The setting endpoint accepts exactly one JSON boolean and uses the engine's native
-`setPluginProperties` permission. Its permission check uses an unwrapped native
-operation, rather than a debugger extension operation with the same name. It writes
-only the `enabled` database property and reads it back before applying runtime
-settings. ConfigurationController's engine crypto and configuration types are
+The setting endpoint accepts exactly one JSON boolean and requires View and Manage
+JavaScript Debugger. Manage also covers the engine's `setPluginProperties` operation
+for this extension, and View covers `getPluginProperties`. The engine authorizes
+extension operations using the owning extension and operation name. The settings
+tests verify the plugin's registered permission mappings for both property operations.
+The endpoint writes only the `enabled` database property and reads it back before applying runtime settings. ConfigurationController's engine crypto and configuration types are
 present only on the JVM test classpath; they are not bundled in the plugin ZIP.
+
+## Released-engine settings authorization
+
+The request filter is registered as a server API provider through the engine's
+supported extension metadata. It binds only to the core extension-property GET/PUT
+handlers, using their actual resource class and method, rather than matching a URL
+string. It checks Jersey's decoded `extensionName` against the exact installed plugin
+and connector metadata keys. Unknown names return 404. Canonical requests retain
+the engine's authentication,
+RBAC permission checks, auditing and property application. This guard is supplied by
+the loaded debugger extension; disabling debugger observation does not unload it.
+Disabling the extension in Extensions and restarting unloads its permissions and
+request filter. The installed-engine harness covers disabled observation, not an
+unloaded extension.
+
+CI runs `scripts/test-settings-rbac.py` against the released OIE 4.6.0/RBAC 1.1.4
+and OIE 4.7.0/RBAC 1.2.0 distributions. It verifies input hashes, installs through
+the real API, exercises the stock engine without RBAC, then upgrades debugger 1.0.3
+with saved settings and existing roles. No engine or RBAC JARs are patched.
+
+```sh
+python3 scripts/test-settings-rbac.py --version 4.6.0 \
+  --engine /path/to/oie_unix_4_6_0.tar.gz --rbac /path/to/rbac-1.1.4.zip \
+  --old-package /path/to/oie-debugger-1.0.3.zip \
+  --package package/target/oie-debugger-1.0.4.zip \
+  --output test-results/settings-4.6.0 --artifacts /path/to/shared-runtime-inputs/sha256
+```
+
+For 4.7.0, use its engine archive and RBAC 1.2.0. The harness checks no-role,
+empty-role, View, ordinary debugging, core extension management, Manage-only,
+View+Manage and administrator accounts. Ten unknown-name variants are tested for
+GET and both merge and replacement PUT; implicit HEAD and legitimate alternative
+URL encodings are covered too. Denied writes must leave all properties unchanged
+before and after restart. Same-login revocation/regrant, malformed requests,
+concurrent identical disables, no-op retries and preserved installation restrictions
+exercise interactions with the rest of the permission change. The regular browser
+regressions cover stale render/action state and lost or reordered replies.
+
+The harness retains HTTP receipts, behavior results, final configuration/event rows,
+logs, process-exit receipts and content-addressed runtime inputs, then removes only
+its owned engine and Derby database. Package verification also requires the guard's
+provider registration and both compiled guard classes, so a packaging omission
+cannot pass the release gate.

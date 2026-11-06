@@ -75,3 +75,64 @@ jobs:
         with:
           name: debugger-runtime-inputs
           path: ${{ runner.temp }}/debugger-runtime-inputs/sha256/
+
+  settings-authorization:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: 4.6.0
+            archive: oie_unix_4_6_0.tar.gz
+            engine_sha: 7c82e79027e671277e1d78d0f7bbb1c53ddf1be476f1e80c2ddbfcf7855900ea
+            rbac: 1.1.4
+            rbac_sha: 7e3ce2a9c55c399b4f7db04e73a4b5d4d8dab8f9f9522d3d44c2ae0ed1d7749d
+          - engine: 4.7.0
+            archive: oie_unix_4_7_0.tar.gz
+            engine_sha: ab08558873dc6be1e474afaacc46efe94d29c945cd3381c10d0ae548ecb429de
+            rbac: 1.2.0
+            rbac_sha: b622861432b16739bd2c9b94e30ba529ecf6c343addbe91ed57cfe53646f3488
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: debugger-package
+          path: candidate
+      - name: Fetch pinned engine, RBAC and pre-upgrade debugger
+        env:
+          ENGINE_VERSION: ${{ matrix.engine }}
+          ENGINE_ARCHIVE: ${{ matrix.archive }}
+          ENGINE_SHA: ${{ matrix.engine_sha }}
+          RBAC_VERSION: ${{ matrix.rbac }}
+          RBAC_SHA: ${{ matrix.rbac_sha }}
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/oie.tar.gz" "https://github.com/OpenIntegrationEngine/engine/releases/download/v$ENGINE_VERSION/$ENGINE_ARCHIVE"
+          echo "$ENGINE_SHA  $RUNNER_TEMP/oie.tar.gz" | sha256sum -c -
+          curl -fL --retry 3 -o "$RUNNER_TEMP/rbac.zip" "https://github.com/diridium-com/role-based-access-control/releases/download/v$RBAC_VERSION/rbac-$RBAC_VERSION.zip"
+          echo "$RBAC_SHA  $RUNNER_TEMP/rbac.zip" | sha256sum -c -
+          curl -fL --retry 3 -o "$RUNNER_TEMP/debugger-1.0.3.zip" https://github.com/gibson9583/oie-debugger/releases/download/v1.0.3/oie-debugger-1.0.3.zip
+          echo "bd1ed9da107b14649da9a0f5807dddcab716d327cbf8fb244e9249321c31e061  $RUNNER_TEMP/debugger-1.0.3.zip" | sha256sum -c -
+      - name: Verify installed settings authorization and restart persistence
+        env:
+          ENGINE_VERSION: ${{ matrix.engine }}
+        run: |
+          python3 scripts/test-settings-rbac.py --version "$ENGINE_VERSION" \
+            --engine "$RUNNER_TEMP/oie.tar.gz" --rbac "$RUNNER_TEMP/rbac.zip" \
+            --old-package "$RUNNER_TEMP/debugger-1.0.3.zip" --package candidate/oie-debugger-*.zip \
+            --output test-results/settings --artifacts "$RUNNER_TEMP/settings-runtime-inputs/sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: settings-authorization-${{ matrix.engine }}
+          path: test-results/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: settings-runtime-inputs-${{ matrix.engine }}
+          path: ${{ runner.temp }}/settings-runtime-inputs/sha256/

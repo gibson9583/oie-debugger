@@ -3,7 +3,6 @@ package org.openintegrationengine.debugger.api;
 import com.mirth.connect.client.core.Operation;
 import com.mirth.connect.client.core.Operation.ExecuteType;
 import com.mirth.connect.client.core.api.Param;
-import com.mirth.connect.client.core.api.servlets.ExtensionServletInterface;
 import com.mirth.connect.model.ServerEvent.Outcome;
 import com.mirth.connect.server.api.DontCheckAuthorized;
 import com.mirth.connect.server.api.MirthServlet;
@@ -110,21 +109,6 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
         Operation original = operation;
         try {
             setOperation(new Operation(name, name, ExecuteType.ASYNC, false));
-            return isUserAuthorized(false);
-        } catch (RuntimeException denied) {
-            return false;
-        } finally {
-            operation = original;
-        }
-    }
-
-    private boolean managementAllowed() {
-        Operation original = operation;
-        try {
-            // The built-in operation must not be wrapped as a debugger ExtensionOperation.
-            operation = new Operation(ExtensionServletInterface.OPERATION_PLUGIN_PROPERTIES_SET,
-                    "Set plugin properties", ExecuteType.ASYNC, false);
-            parameterMap.put("extensionName", PLUGIN_POINT);
             return isUserAuthorized(false);
         } catch (RuntimeException denied) {
             return false;
@@ -265,7 +249,7 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
         result.put("available", unavailable == null);
         result.put("configuredEnabled", policy.enabled);
         result.put("userAllowed", userAllowed);
-        result.put("managementAllowed", managementAllowed());
+        result.put("managementAllowed", permitsOperation("debuggerSetEnabled"));
         result.put("reason", unavailable);
         result.put("apiVersion", 1);
         result.put("controlAllowed", policy.enabled && userAllowed && permitsOperation("debuggerCommand"));
@@ -282,10 +266,10 @@ public class DebuggerServlet extends MirthServlet implements DebuggerServletInte
     @DontCheckAuthorized
     public Response setEnabled(@Param(value="body", excludeFromAudit=true) String body) {
         return json(() -> {
-            checkUserAuthorized();
+            requireOperation("debuggerCapabilities");
             parameterMap.put("extensionName", PLUGIN_POINT);
-            if (!managementAllowed())
-                throw new SecurityException("Manage Extensions permission is required to enable or disable debugging");
+            if (!permitsOperation("debuggerSetEnabled"))
+                throw new SecurityException("Manage JavaScript Debugger permission is required to enable or disable debugging");
             Map<String, Object> input = Json.read(body);
             if (input.size() != 1 || !(input.get("enabled") instanceof Boolean enabled))
                 throw new IllegalArgumentException("Provide only an enabled boolean");

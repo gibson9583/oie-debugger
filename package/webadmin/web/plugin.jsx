@@ -532,7 +532,7 @@ function DebuggerView() {
               ? "Enable debugging to choose a channel and arm a session."
               : "Arming selects executions that may pause. Disabling stops debugging engine-wide and releases paused executions."}</p>
             {configuredEnabled === true && <p className="dbg-muted">After enabling, redeploy the channels you want to debug.</p>}
-            {capabilities?.managementAllowed === false && <p className="dbg-muted">Manage Extensions permission is required to change this setting.</p>}
+            {capabilities?.managementAllowed === false && <p className="dbg-muted">Manage JavaScript Debugger permission is required to change this setting.</p>}
           </div>
         </section>
         {settingError && <div className="dbg-notice dbg-error" role="alert">{settingError}</div>}
